@@ -1,4 +1,5 @@
 ![ci workflow](https://github.com/Q-Solvers/cpp-arnoldi/actions/workflows/ci.yml/badge.svg)
+[![codecov](https://codecov.io/github/Q-solvers/cpp-arnoldi/graph/badge.svg?token=M8DQCOO8I2)](https://codecov.io/github/Q-solvers/cpp-arnoldi)
 
 # cpp-arnoldi (C++17)
 

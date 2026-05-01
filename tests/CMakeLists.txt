@@ -1,0 +1,5 @@
+foreach(_test IN ITEMS test_validation test_getv0 test_solver)
+    add_executable(${_test} ${_test}.cpp)
+    target_link_libraries(${_test} PRIVATE arnoldi)
+    add_test(NAME ${_test} COMMAND ${_test})
+endforeach()

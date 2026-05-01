@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            build_type: Release
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+            build_type: Debug
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            build_type: Release
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+            build_type: Debug
+
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gfortran \
+            libblas-dev liblapack-dev libopenmpi-dev
+
+      - name: Build and install arpack-ng
+        run: |
+          git clone --depth 1 https://github.com/opencollab/arpack-ng.git /tmp/arpack-ng
+          cmake -S /tmp/arpack-ng -B /tmp/arpack-ng/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/arpack-install \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DMPI=OFF \
+            -DICB=OFF
+          cmake --build /tmp/arpack-ng/build -j$(nproc)
+          cmake --install /tmp/arpack-ng/build
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_PREFIX_PATH=/tmp/arpack-install \
+            -DARNOLDI_BUILD_EXAMPLES=ON \
+            -DARNOLDI_BUILD_TESTS=ON \
+            -DARNOLDI_REGRESSION=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run examples
+        run: |
+          ./build/examples/example_symmetric_laplacian
+          ./build/examples/example_arnoldi_sym
+          ./build/examples/example_arnoldi_nonsym
+          ./build/examples/example_arnoldi_herm
+          ./build/examples/example_arnoldi_dsdrv1
+          ./build/examples/example_arnoldi_dndrv1
+          ./build/examples/example_arnoldi_dsdrv2
+          ./build/examples/example_arnoldi_dndrv2
+          ./build/examples/example_arnoldi_dsdrv4
+          ./build/examples/example_arnoldi_dsdrv5
+          ./build/examples/example_arnoldi_dsdrv6
+
+      - name: Run MPI example
+        run: mpirun --oversubscribe -np 4 ./build/examples/example_arnoldi_mpi
+
+      - name: Benchmark (C++ vs ARPACK)
+        run: ctest --test-dir build -V
+
+  coverage:
+    runs-on: ubuntu-latest
+    name: Coverage
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gfortran lcov \
+            libblas-dev liblapack-dev libopenmpi-dev
+
+      - name: Build and install arpack-ng
+        run: |
+          git clone --depth 1 https://github.com/opencollab/arpack-ng.git /tmp/arpack-ng
+          cmake -S /tmp/arpack-ng -B /tmp/arpack-ng/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/arpack-install \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DMPI=OFF \
+            -DICB=OFF
+          cmake --build /tmp/arpack-ng/build -j$(nproc)
+          cmake --install /tmp/arpack-ng/build
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DCMAKE_PREFIX_PATH=/tmp/arpack-install \
+            -DARNOLDI_BUILD_EXAMPLES=ON \
+            -DARNOLDI_BUILD_TESTS=ON \
+            -DARNOLDI_REGRESSION=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run examples
+        run: |
+          ./build/examples/example_symmetric_laplacian
+          ./build/examples/example_arnoldi_sym
+          ./build/examples/example_arnoldi_nonsym
+          ./build/examples/example_arnoldi_herm
+          ./build/examples/example_arnoldi_dsdrv1
+          ./build/examples/example_arnoldi_dndrv1
+          ./build/examples/example_arnoldi_dsdrv2
+          ./build/examples/example_arnoldi_dndrv2
+          ./build/examples/example_arnoldi_dsdrv4
+          ./build/examples/example_arnoldi_dsdrv5
+          ./build/examples/example_arnoldi_dsdrv6
+
+      - name: Run MPI example
+        run: mpirun --oversubscribe -np 4 ./build/examples/example_arnoldi_mpi
+
+      - name: Run tests and benchmark
+        run: ctest --test-dir build -V --output-on-failure
+
+      - name: Collect coverage
+        run: |
+          lcov --capture --directory build --output-file coverage.info \
+            --include '*/include/arnoldi/*'
+          lcov --list coverage.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.info
+          fail_ci_if_error: false

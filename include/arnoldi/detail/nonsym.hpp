@@ -801,10 +801,10 @@ namespace arnoldi::detail {
       ierr = -6;
     else if (lworkl < 3 * ncv * ncv + 6 * ncv)
       ierr = -7;
-    else if (rvec && howmny[0] != 'A' && howmny[0] != 'P')
-      ierr = -13;
     else if (rvec && howmny[0] == 'S')
       ierr = -12;
+    else if (rvec && howmny[0] != 'A' && howmny[0] != 'P')
+      ierr = -13;
 
     char type[7];
     if (mode == 1 || mode == 2)

@@ -148,9 +148,6 @@ jobs:
         run: |
           lcov --capture --directory build --output-file coverage.info \
             --include '*/include/arnoldi/*'
-          lcov --remove coverage.info \
-            '*/examples/*' '*/tests/*' '*/build/*' \
-            --output-file coverage.info
           lcov --list coverage.info
 
       - name: Upload coverage to Codecov

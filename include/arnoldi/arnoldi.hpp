@@ -184,6 +184,7 @@ namespace arnoldi {
     int              info() const noexcept { return info_; }
 
     const Scalar*    v() const noexcept { return v_.data(); }
+    Scalar*          workd() noexcept { return workd_.data(); }
     const real_type* workl() const noexcept { return workl_.data(); }
     const int*       iparam() const noexcept { return iparam_.data(); }
     const int*       ipntr() const noexcept { return ipntr_.data(); }

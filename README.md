@@ -36,7 +36,6 @@ target_link_libraries(your_target PRIVATE arpack::callback)
 - `include/arnoldi/arnoldi.hpp` — include this
 - `include/arnoldi/detail/` — implementation headers
 - `examples/` — `example_symmetric_laplacian`, plus `arpack_cpp_examples` (Fortran `EXAMPLES/` name catalog)
-- `tools/gen_fortran_examples.py` — optional; regenerates `examples/generated/` when upstream Fortran examples change
 
 ## Origin
 

@@ -1,4 +1,4 @@
-foreach(_test IN ITEMS test_validation test_getv0 test_solver)
+foreach(_test IN ITEMS test_validation test_getv0 test_solver test_helpers test_modes test_low_level_validation)
     add_executable(${_test} ${_test}.cpp)
     target_link_libraries(${_test} PRIVATE arnoldi)
     add_test(NAME ${_test} COMMAND ${_test})

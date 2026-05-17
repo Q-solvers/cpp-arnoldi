@@ -21,17 +21,14 @@ void dgttrs_(const char* trans, const int* n, const int* nrhs, const double* dl,
              const double* du2, const int* ipiv, double* b, const int* ldb, int* info);
 }
 
-static int g_pass = 0, g_fail = 0;
+#include <catch2/catch_test_macros.hpp>
 
-static void check(const char* name, bool cond) {
-    if (cond) {
-        std::printf("  OK    %s\n", name);
-        ++g_pass;
-    } else {
-        std::printf("  FAIL  %s\n", name);
-        ++g_fail;
-    }
-}
+// Bridge legacy check("desc", cond) calls onto Catch2 assertions.
+#define check(msg, cond) \
+    do {                 \
+        INFO(msg);       \
+        CHECK((cond));   \
+    } while (0)
 
 // ---------------------------------------------------------------------------
 // Analytic spectra of the test problems.
@@ -177,7 +174,7 @@ static void mv_mass(int n, const double* v, double* w) {
 // Mode 3: A*x = lambda*M*x via OP = inv(A - sigma*M)*M, B = M.
 // Shift-invert with σ=0 converges to the eigenvalues of (A,M) closest to 0,
 // i.e. the smallest eigenvalues of the FE Laplacian.
-static void test_sym_mode3_shift_invert() {
+TEST_CASE("test_sym_mode3_shift_invert", "[modes]") {
     const int    n = 100, nev = 4, ncv = 10;
     const double sigma = 0.0;
     ShiftInvertFE shift(n, sigma);
@@ -210,7 +207,7 @@ static void test_sym_mode3_shift_invert() {
 // Mode 4 (buckling): K*x = lambda*KG*x via OP = inv(K - sigma*KG)*K, B = K.
 // In our setup K = FE stiffness, KG = FE mass, so the underlying spectrum is
 // still the FE Laplacian spectrum and the converged values are nearest σ.
-static void test_sym_mode4_buckling() {
+TEST_CASE("test_sym_mode4_buckling", "[modes]") {
     const int    n = 100, nev = 4, ncv = 10;
     const double sigma = 1.0;
     ShiftInvertFE shift(n, sigma);
@@ -240,7 +237,7 @@ static void test_sym_mode4_buckling() {
 
 // Mode 5 (Cayley): A*x = lambda*M*x via OP = inv(A - sigma*M)*(A + sigma*M).
 // μ = (λ+σ)/(λ−σ); LM Ritz values give λ closest to σ.
-static void test_sym_mode5_cayley() {
+TEST_CASE("test_sym_mode5_cayley", "[modes]") {
     const int    n = 100, nev = 4, ncv = 20;
     const double sigma = 150.0;
     ShiftInvertFE shift(n, sigma);
@@ -272,7 +269,7 @@ static void test_sym_mode5_cayley() {
 // with A*x because saitr later reads it back when computing the M-norm
 // (wnorm² = (M^-1 A x)·x where x is required to be A*x at that point).
 // A = standard tridiagonal Laplacian, M = 2*I, so eigenvalues are λ(A)/2.
-static void test_sym_mode2_generalized() {
+TEST_CASE("test_sym_mode2_generalized", "[modes]") {
     const int n = 64, nev = 3, ncv = 10;
 
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("G", n, "LM", nev, ncv);
@@ -304,7 +301,7 @@ static void test_sym_mode2_generalized() {
 // Nonsymmetric shift-invert (mode 3, real shift).  The underlying problem is
 // still symmetric (FE Laplacian generalized), so all eigenvalues are real and
 // nev nearest σ should appear in r.values_re with values_im ≈ 0.
-static void test_nonsym_mode3_real_shift() {
+TEST_CASE("test_nonsym_mode3_real_shift", "[modes]") {
     const int    n = 100, nev = 4, ncv = 20;
     const double sigma = 1.0;
     ShiftInvertFE shift(n, sigma);
@@ -341,7 +338,7 @@ static void test_nonsym_mode3_real_shift() {
 
 // Sym which="LM" with rvec=false hits the REGULR branch of seupd that copies
 // ritz into d, distinct from the rvec=true sesrt path.
-static void test_sym_regular_rvec_false_LM() {
+TEST_CASE("test_sym_regular_rvec_false_LM", "[modes]") {
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "LM", nev, ncv);
     s.tol(1e-10).maxiter(500);
@@ -361,7 +358,7 @@ static void test_sym_regular_rvec_false_LM() {
 
 // Nonsym with which="SM" exercises the SM mapping in ngets and the regular
 // extraction path.  Underlying matrix is symmetric so eigenvalues are real.
-static void test_nonsym_which_SM() {
+TEST_CASE("test_nonsym_which_SM", "[modes]") {
     const int n = 32, nev = 3, ncv = 12;
     arnoldi::Arnoldi<arnoldi::Kind::Nonsym, double> s("I", n, "SM", nev, ncv);
     s.tol(1e-10).maxiter(500);
@@ -382,7 +379,7 @@ static void test_nonsym_which_SM() {
 
 // Herm with which="LM" + rvec=false; covers the saupd<complex> regular path
 // and the rvec=false copy-Ritz path in seupd<complex>.
-static void test_herm_LM_LA() {
+TEST_CASE("test_herm_LM_LA", "[modes]") {
     using cplx = std::complex<double>;
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Herm, cplx> s("I", n, "LM", nev, ncv);
@@ -428,7 +425,7 @@ struct DebugAllOn {
 // *aupd, sapps/napps, sgets/ngets, *eupd, and getv0 by running once with
 // every debug knob turned all the way up.  Output is voluminous but only
 // printed during this single test.
-static void test_debug_branches() {
+TEST_CASE("test_debug_branches", "[modes]") {
     DebugAllOn guard;
     {
         const int n = 10, nev = 2, ncv = 6;
@@ -482,7 +479,7 @@ static void test_debug_branches() {
 // running both Sym<float> + which="BE" (BE branch swaps with sswap_) and
 // Nonsym<float>.  Standard tridiagonal Laplacian, small problem size.
 // Tolerances are looser than the double tests because of single precision.
-static void test_float_overloads() {
+TEST_CASE("test_float_overloads", "[modes]") {
     {
         const int n = 16, nev = 4, ncv = 12;
         arnoldi::Arnoldi<arnoldi::Kind::Sym, float> s("I", n, "BE", nev, ncv);
@@ -521,7 +518,7 @@ static void test_float_overloads() {
 // naup2 runs many times.  Each pass through the loop hits the bmat=='G'
 // post-napps recompute that the more relaxed shift-invert tests skip
 // because they converge in a single iter.
-static void test_nonsym_generalized_many_iters() {
+TEST_CASE("test_nonsym_generalized_many_iters", "[modes]") {
     const int n = 60, nev = 6, ncv = 10;
     const double sigma = 0.5;
     ShiftInvertFE shift(n, sigma);
@@ -546,7 +543,7 @@ static void test_nonsym_generalized_many_iters() {
 // dimensionless tridiagonal A = [-1, 2, -1] and mass M = [1, 4, 1] / 6;
 // the analytic spectrum is the FE Laplacian's with h ≡ 1 (no scaling):
 //   λ_k = 6 (1 - cos(kπ/(n+1))) / (2 + cos(kπ/(n+1))).
-static void test_sym_generalized_many_iters() {
+TEST_CASE("test_sym_generalized_many_iters", "[modes]") {
     const int n = 60, nev = 4, ncv = 8;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("G", n, "LM", nev, ncv);
     s.tol(1e-12).maxiter(1000).mode(2);
@@ -598,7 +595,7 @@ static void test_sym_generalized_many_iters() {
 
 // Force the REALPT (mode 3 with sigmai != 0) and IMAGPT (mode 4) branches in
 // neupd's type-selection logic.
-static void test_nonsym_neupd_realpt_imagpt() {
+TEST_CASE("test_nonsym_neupd_realpt_imagpt", "[modes]") {
     const int n = 16, nev = 2, ncv = 8;
     auto av = [n](const double* x, double* y) {
         y[0] = x[1];
@@ -629,7 +626,7 @@ static void test_nonsym_neupd_realpt_imagpt() {
 // Spectrum is ±2i cos(kπ/(n+1)) so neupd's conjugate-pair post-processing
 // branches (REGULR & SHIFTI lapy2/scal blocks) get exercised. Real parts must
 // be ≈ 0 and imaginary magnitudes must match the exact closed form.
-static void test_nonsym_complex_eigenvalues() {
+TEST_CASE("test_nonsym_complex_eigenvalues", "[modes]") {
     const int n = 16, nev = 4, ncv = 12;
     auto av = [n](const double* x, double* y) {
         y[0] = x[1];
@@ -667,24 +664,4 @@ static void test_nonsym_complex_eigenvalues() {
         std::printf("    nonsym complex LI max rel err = %.3e\n", err);
         check("Nonsym complex LI rvec=false: matches exact imag pairs", err < 1e-9);
     }
-}
-
-int main() {
-    std::printf("test_modes:\n");
-    test_sym_mode2_generalized();
-    test_sym_mode3_shift_invert();
-    test_sym_mode4_buckling();
-    test_sym_mode5_cayley();
-    test_nonsym_mode3_real_shift();
-    test_sym_regular_rvec_false_LM();
-    test_nonsym_which_SM();
-    test_herm_LM_LA();
-    test_debug_branches();
-    test_float_overloads();
-    test_nonsym_complex_eigenvalues();
-    test_nonsym_neupd_realpt_imagpt();
-    test_nonsym_generalized_many_iters();
-    test_sym_generalized_many_iters();
-    std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
-    return g_fail > 0 ? 1 : 0;
 }

@@ -17,17 +17,14 @@
 #include <string>
 #include <vector>
 
-static int g_pass = 0, g_fail = 0;
+#include <catch2/catch_test_macros.hpp>
 
-static void check(const char* name, bool cond) {
-    if (cond) {
-        std::printf("  OK    %s\n", name);
-        ++g_pass;
-    } else {
-        std::printf("  FAIL  %s\n", name);
-        ++g_fail;
-    }
-}
+// Bridge legacy check("desc", cond) calls onto Catch2 assertions.
+#define check(msg, cond) \
+    do {                 \
+        INFO(msg);       \
+        CHECK((cond));   \
+    } while (0)
 
 template <typename Real>
 static bool nearly(Real a, Real b, Real tol = Real(1e-10)) { return std::abs(a - b) <= tol; }
@@ -35,7 +32,7 @@ static bool nearly(Real a, Real b, Real tol = Real(1e-10)) { return std::abs(a -
 // In ARPACK the "wanted" values end up at the end of the sorted array.  So
 // sortc/sortr with "LM" arranges by ascending magnitude; "SM" by descending
 // magnitude, etc.
-static void test_sortc_all() {
+TEST_CASE("test_sortc_all", "[helpers]") {
     using arnoldi::detail::sortc;
 
     auto run = [&](const char* which, std::vector<double> xr, std::vector<double> xi,
@@ -53,7 +50,7 @@ static void test_sortc_all() {
     run("SI", {0, 0, 0}, {1, 3, 2}, {1, 2, 3}, {0, 0, 0}, {3, 2, 1});
 }
 
-static void test_sortr_all() {
+TEST_CASE("test_sortr_all", "[helpers]") {
     using arnoldi::detail::sortr;
     auto run = [&](const char* which, std::vector<double> a, std::vector<double> b, std::vector<double> exp_a) {
         sortr<double>(which, true, (int)a.size(), a.data(), b.data());
@@ -67,7 +64,7 @@ static void test_sortr_all() {
 
 // Sort a 3x3 matrix by columns based on a key vector x; verify both the key
 // reordering and that columns of `a` followed (apply=true).
-static void test_sesrt_all() {
+TEST_CASE("test_sesrt_all", "[helpers]") {
     using arnoldi::detail::sesrt;
     const int n = 3, lda = 3;
     auto run = [&](const char* which, std::vector<double> x, std::vector<double> exp_x) {
@@ -85,7 +82,7 @@ static void test_sesrt_all() {
 
 // Verify ngets walks each branch of the which-translation switch and the
 // "split conjugate pair" guard that pulls the boundary index back by one.
-static void test_ngets_branches() {
+TEST_CASE("test_ngets_branches", "[helpers]") {
     using arnoldi::detail::ngets;
     int kev = 2, np = 2;
     std::vector<double> rr = {1, 2, 3, 4}, ri = {0, 0, 0, 0}, bnd = {.1, .2, .3, .4};
@@ -108,7 +105,7 @@ static void test_ngets_branches() {
 
 // sgets has a BE special case that swaps two halves of the spectrum to keep
 // "both ends" balanced. Exercise both BE and a regular which.
-static void test_sgets_branches() {
+TEST_CASE("test_sgets_branches", "[helpers]") {
     using arnoldi::detail::sgets;
     std::vector<double> ritz = {1, 2, 3, 4, 5, 6}, bounds = {.1, .2, .3, .4, .5, .6};
     std::vector<double> shifts(3);
@@ -122,7 +119,7 @@ static void test_sgets_branches() {
 
 // Convergence check returns the number of Ritz values whose error bound is
 // below tol*max(eps23, |ritz|).
-static void test_conv_check() {
+TEST_CASE("test_conv_check", "[helpers]") {
     using arnoldi::detail::nconv;
     using arnoldi::detail::sconv;
     std::vector<double> ritzr = {1, 2, 3}, ritzi = {0, 0, 0}, bounds = {1e-15, 1e-15, 1e-1};
@@ -137,7 +134,7 @@ static void test_conv_check() {
 
 // stqrb is the tridiagonal QR used by seigt; cover n=0, n=1 and a small
 // generic case so the LAPACK glue and label-90 pivot loop both run.
-static void test_stqrb() {
+TEST_CASE("test_stqrb", "[helpers]") {
     using arnoldi::detail::stqrb;
     int info = 0;
     std::vector<double> z;
@@ -160,7 +157,7 @@ static void test_stqrb() {
 
 // Exercise the seigt entry point used by sym Lanczos extraction; also covers
 // the n>1 sub-diagonal debug print branch when msglvl>0.
-static void test_seigt_neigh() {
+TEST_CASE("test_seigt_neigh", "[helpers]") {
     using arnoldi::detail::neigh;
     using arnoldi::detail::seigt;
 
@@ -195,7 +192,7 @@ static void test_seigt_neigh() {
 // Hit each print routine in detail::debug for both real and complex element
 // types so the four print_elem overloads are all instantiated.  Output is
 // noisy but small; we just want the lines exercised for coverage.
-static void test_debug_prints() {
+TEST_CASE("test_debug_prints", "[helpers]") {
     using namespace arnoldi::detail;
 
     int    iv[3]   = {1, 2, 3};
@@ -217,7 +214,7 @@ static void test_debug_prints() {
 
 // Exercise the Real/Complex Ops dispatches that the standard double symmetric
 // solver path doesn't reach: rscal/raxpy on a complex vector, dotc, gemv_rv.
-static void test_ops_complex_dispatch() {
+TEST_CASE("test_ops_complex_dispatch", "[helpers]") {
     using cplx = std::complex<double>;
     using O    = arnoldi::detail::Ops<cplx>;
 
@@ -257,7 +254,7 @@ static void test_ops_complex_dispatch() {
 
 // pdot/prdotc/pnrm2_real/pnrm2 reduction wrappers: ensure they call through
 // SerialComm without modifying anything beyond the BLAS forwarding.
-static void test_parallel_reductions() {
+TEST_CASE("test_parallel_reductions", "[helpers]") {
     using arnoldi::detail::pdot;
     using arnoldi::detail::pnrm2;
     using arnoldi::detail::pnrm2_real;
@@ -272,22 +269,4 @@ static void test_parallel_reductions() {
     std::vector<cplx> z = {{3, 0}, {0, 4}};
     check("pnrm2 serial complex", nearly(pnrm2<cplx>(comm, 2, z.data(), 1), 5.0));
     check("prdotc serial complex", nearly(prdotc<cplx>(comm, 2, z.data(), 1, z.data(), 1), 25.0));
-}
-
-int main() {
-    std::printf("test_helpers:\n");
-    setvbuf(stdout, nullptr, _IOLBF, 0);
-    test_sortc_all();
-    test_sortr_all();
-    test_sesrt_all();
-    test_ngets_branches();
-    test_sgets_branches();
-    test_conv_check();
-    test_stqrb();
-    test_seigt_neigh();
-    test_debug_prints();
-    test_ops_complex_dispatch();
-    test_parallel_reductions();
-    std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
-    return g_fail > 0 ? 1 : 0;
 }

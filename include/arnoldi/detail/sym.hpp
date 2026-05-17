@@ -21,9 +21,10 @@ namespace arnoldi::detail {
   // saitr — Lanczos iteration (symmetric / Hermitian).
   // Scalar = double|float for real symmetric, complex<T> for Hermitian.
   // Vectors (v, resid, workd) are Scalar; tridiagonal h is detail::real_t<Scalar>.
-  template <typename Scalar, typename OP, typename BOP, typename Comm>
-  void saitr(const char* bmat, int n, int k, int np, int mode, Scalar* resid, detail::real_t<Scalar>& rnorm, Scalar* v, int ldv,
-             detail::real_t<Scalar>* h, int ldh, Scalar* workd, int& info, OP&& op, BOP&& bop, const Comm& comm) {
+  template <typename Scalar, typename Backend = detail::CpuBackend, typename OP, typename BOP, typename Comm>
+  void saitr(detail::BackendRef<Backend> bref, const char* bmat, int n, int k, int np, int mode, Scalar* resid,
+             detail::real_t<Scalar>& rnorm, Scalar* v, int ldv, detail::real_t<Scalar>* h, int ldh, Scalar* workd, int& info,
+             OP&& op, BOP&& bop, const Comm& comm) {
     using Real    = detail::real_t<Scalar>;
     const int ipj = 0, irj = n, ivj = 2 * n;
 
@@ -32,6 +33,26 @@ namespace arnoldi::detail {
     double    t0, t1, t2, t3, t4, t5;
     detail::arscnd(t0);
     info = 0;
+
+    // The diagonal of H (h[ldh + j - 1]) is write-only inside this loop and
+    // is consumed only later by seigt. Stage each per-step device read
+    // asynchronously and reconstruct the host diagonal with a single stream
+    // sync per saitr call, instead of one device->host stall per Lanczos
+    // step. Under CpuBackend read_scalar_async is an immediate copy and
+    // sync() a no-op, so the staged values and their summation order are
+    // identical to a direct read — numerically bit-for-bit unchanged.
+    std::vector<Scalar> hdiag_stage(static_cast<std::size_t>(k + np));
+    std::vector<Scalar> hreorth_stage(static_cast<std::size_t>(k + np) * 2);
+    std::vector<int>    hreorth_cnt(static_cast<std::size_t>(k + np), 0);
+    auto                flush_hdiag = [&](int jlast) {
+      detail::Ops<Scalar, Backend>::sync(bref);
+      for (int jj = k + 1; jj <= jlast; ++jj) {
+        Real d   = std::real(hdiag_stage[jj - 1]);
+        int  cnt = hreorth_cnt[jj - 1];
+        for (int r = 0; r < cnt; ++r) d += std::real(hreorth_stage[static_cast<std::size_t>(jj - 1) * 2 + r]);
+        h[ldh + jj - 1] = d;
+      }
+    };
 
     for (int j = k + 1; j <= k + np; ++j) {
       if (msglvl > 2) {
@@ -56,38 +77,40 @@ namespace arnoldi::detail {
 
         int ierr = -1;
         for (int itry = 1; itry <= 3; ++itry) {
-          getv0<Scalar>(bmat, itry, false, n, j, v, ldv, resid, rnorm, workd, ierr, op, bop, comm);
+          getv0<Scalar, Backend>(bref, bmat, itry, false, n, j, v, ldv, resid, rnorm, workd, ierr, op, bop, comm);
           if (ierr >= 0) break;
         }
         if (ierr < 0) {
           info = j - 1;
+          flush_hdiag(j - 1);
           detail::arscnd(t1);
           detail::stats.aitr += (t1 - t0);
           return;
         }
       }
 
-      detail::Ops<Scalar>::copy(n, resid, 1, &v[(j - 1) * ldv], 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &v[(j - 1) * ldv], 1);
       if (rnorm >= safmin) {
         Real temp1 = Real(1) / rnorm;
-        detail::Ops<Scalar>::rscal(n, temp1, &v[(j - 1) * ldv], 1);
-        detail::Ops<Scalar>::rscal(n, temp1, &workd[ipj], 1);
+        detail::Ops<Scalar, Backend>::rscal(bref, n, temp1, &v[(j - 1) * ldv], 1);
+        detail::Ops<Scalar, Backend>::rscal(bref, n, temp1, &workd[ipj], 1);
       } else {
         int  i_zero = 0, i_one = 1;
         int  infol;
         Real r_one = Real(1);
-        detail::Ops<Scalar>::lascl_("G", &i_zero, &i_zero, &rnorm, &r_one, &n, &i_one, &v[(j - 1) * ldv], &n, &infol);
-        detail::Ops<Scalar>::lascl_("G", &i_zero, &i_zero, &rnorm, &r_one, &n, &i_one, &workd[ipj], &n, &infol);
+        detail::Ops<Scalar, Backend>::lascl_(bref, "G", &i_zero, &i_zero, &rnorm, &r_one, &n, &i_one, &v[(j - 1) * ldv], &n,
+                                             &infol);
+        detail::Ops<Scalar, Backend>::lascl_(bref, "G", &i_zero, &i_zero, &rnorm, &r_one, &n, &i_one, &workd[ipj], &n, &infol);
       }
 
       detail::stats.nopx++;
       detail::arscnd(t2);
-      detail::Ops<Scalar>::copy(n, &v[(j - 1) * ldv], 1, &workd[ivj], 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, &v[(j - 1) * ldv], 1, &workd[ivj], 1);
       op(&workd[ivj], &workd[irj]);
       detail::arscnd(t3);
       detail::stats.mvopx += (t3 - t2);
 
-      detail::Ops<Scalar>::copy(n, &workd[irj], 1, resid, 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, &workd[irj], 1, resid, 1);
 
       if (mode != 2) {
         detail::arscnd(t2);
@@ -95,7 +118,7 @@ namespace arnoldi::detail {
           detail::stats.nbx++;
           bop(&workd[irj], &workd[ipj]);
         } else {
-          detail::Ops<Scalar>::copy(n, resid, 1, &workd[ipj], 1);
+          detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &workd[ipj], 1);
         }
         if (*bmat == 'G') {
           detail::arscnd(t3);
@@ -105,26 +128,26 @@ namespace arnoldi::detail {
 
       Real wnorm;
       if (mode == 2) {
-        wnorm = detail::prdotc<Scalar>(comm, n, resid, 1, &workd[ivj], 1);
+        wnorm = detail::prdotc<Scalar, Backend>(bref, comm, n, resid, 1, &workd[ivj], 1);
         wnorm = std::sqrt(std::abs(wnorm));
       } else if (*bmat == 'G') {
-        wnorm = detail::prdotc<Scalar>(comm, n, resid, 1, &workd[ipj], 1);
+        wnorm = detail::prdotc<Scalar, Backend>(bref, comm, n, resid, 1, &workd[ipj], 1);
         wnorm = std::sqrt(std::abs(wnorm));
       } else {
-        wnorm = detail::pnrm2<Scalar>(comm, n, resid, 1);
+        wnorm = detail::pnrm2<Scalar, Backend>(bref, comm, n, resid, 1);
       }
 
       if (mode != 2) {
-        detail::Ops<Scalar>::gemv(detail::Ops<Scalar>::herm_trans(), n, j, Scalar(1), v, ldv, &workd[ipj], 1, Scalar(0),
-                                  &workd[irj], 1);
+        detail::Ops<Scalar, Backend>::gemv(bref, detail::Ops<Scalar, Backend>::herm_trans(), n, j, Scalar(1), v, ldv, &workd[ipj],
+                                           1, Scalar(0), &workd[irj], 1);
       } else {
-        detail::Ops<Scalar>::gemv(detail::Ops<Scalar>::herm_trans(), n, j, Scalar(1), v, ldv, &workd[ivj], 1, Scalar(0),
-                                  &workd[irj], 1);
+        detail::Ops<Scalar, Backend>::gemv(bref, detail::Ops<Scalar, Backend>::herm_trans(), n, j, Scalar(1), v, ldv, &workd[ivj],
+                                           1, Scalar(0), &workd[irj], 1);
       }
-      comm.allreduce_sum(&workd[irj], j);
-      detail::Ops<Scalar>::gemv("N", n, j, Scalar(-1), v, ldv, &workd[irj], 1, Scalar(1), resid, 1);
+      detail::backend_allreduce(bref, comm, &workd[irj], j);
+      detail::Ops<Scalar, Backend>::gemv(bref, "N", n, j, Scalar(-1), v, ldv, &workd[irj], 1, Scalar(1), resid, 1);
 
-      h[ldh + j - 1] = std::real(workd[irj + j - 1]);
+      detail::Ops<Scalar, Backend>::read_scalar_async(bref, &hdiag_stage[j - 1], &workd[irj + j - 1]);
       if (j == 1 || rstart)
         h[j - 1] = Real(0);
       else
@@ -135,10 +158,10 @@ namespace arnoldi::detail {
       detail::arscnd(t2);
       if (*bmat == 'G') {
         detail::stats.nbx++;
-        detail::Ops<Scalar>::copy(n, resid, 1, &workd[irj], 1);
+        detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &workd[irj], 1);
         bop(&workd[irj], &workd[ipj]);
       } else {
-        detail::Ops<Scalar>::copy(n, resid, 1, &workd[ipj], 1);
+        detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &workd[ipj], 1);
       }
       if (*bmat == 'G') {
         detail::arscnd(t3);
@@ -146,10 +169,10 @@ namespace arnoldi::detail {
       }
 
       if (*bmat == 'G') {
-        rnorm = detail::prdotc<Scalar>(comm, n, resid, 1, &workd[ipj], 1);
+        rnorm = detail::prdotc<Scalar, Backend>(bref, comm, n, resid, 1, &workd[ipj], 1);
         rnorm = std::sqrt(std::abs(rnorm));
       } else {
-        rnorm = detail::pnrm2<Scalar>(comm, n, resid, 1);
+        rnorm = detail::pnrm2<Scalar, Backend>(bref, comm, n, resid, 1);
       }
 
       if (rnorm <= Real(0.717) * wnorm) {
@@ -160,22 +183,27 @@ namespace arnoldi::detail {
             detail::debug.vout(2, xtemp, "_saitr: re-orthonalization ; wnorm and rnorm are");
           }
 
-          detail::Ops<Scalar>::gemv(detail::Ops<Scalar>::herm_trans(), n, j, Scalar(1), v, ldv, &workd[ipj], 1, Scalar(0),
-                                    &workd[irj], 1);
-          comm.allreduce_sum(&workd[irj], j);
-          detail::Ops<Scalar>::gemv("N", n, j, Scalar(-1), v, ldv, &workd[irj], 1, Scalar(1), resid, 1);
+          detail::Ops<Scalar, Backend>::gemv(bref, detail::Ops<Scalar, Backend>::herm_trans(), n, j, Scalar(1), v, ldv,
+                                             &workd[ipj], 1, Scalar(0), &workd[irj], 1);
+          detail::backend_allreduce(bref, comm, &workd[irj], j);
+          detail::Ops<Scalar, Backend>::gemv(bref, "N", n, j, Scalar(-1), v, ldv, &workd[irj], 1, Scalar(1), resid, 1);
 
           if (j == 1 || rstart) h[j - 1] = Real(0);
-          h[ldh + j - 1] = h[ldh + j - 1] + std::real(workd[irj + j - 1]);
+          {
+            int& rc = hreorth_cnt[j - 1];
+            detail::Ops<Scalar, Backend>::read_scalar_async(bref, &hreorth_stage[static_cast<std::size_t>(j - 1) * 2 + rc],
+                                                            &workd[irj + j - 1]);
+            ++rc;
+          }
 
           detail::arscnd(t2);
           Real rnorm1;
           if (*bmat == 'G') {
             detail::stats.nbx++;
-            detail::Ops<Scalar>::copy(n, resid, 1, &workd[irj], 1);
+            detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &workd[irj], 1);
             bop(&workd[irj], &workd[ipj]);
           } else {
-            detail::Ops<Scalar>::copy(n, resid, 1, &workd[ipj], 1);
+            detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &workd[ipj], 1);
           }
           if (*bmat == 'G') {
             detail::arscnd(t3);
@@ -183,10 +211,10 @@ namespace arnoldi::detail {
           }
 
           if (*bmat == 'G') {
-            rnorm1 = detail::prdotc<Scalar>(comm, n, resid, 1, &workd[ipj], 1);
+            rnorm1 = detail::prdotc<Scalar, Backend>(bref, comm, n, resid, 1, &workd[ipj], 1);
             rnorm1 = std::sqrt(std::abs(rnorm1));
           } else {
-            rnorm1 = detail::pnrm2<Scalar>(comm, n, resid, 1);
+            rnorm1 = detail::pnrm2<Scalar, Backend>(bref, comm, n, resid, 1);
           }
 
           if (msglvl > 0 && riter > 0) {
@@ -205,7 +233,7 @@ namespace arnoldi::detail {
           detail::stats.nitref++;
           rnorm = rnorm1;
           if (riter == 1) {
-            for (int jj = 0; jj < n; jj++) resid[jj] = Scalar(0);
+            detail::Ops<Scalar, Backend>::zero(bref, n, resid);
             rnorm = Real(0);
           }
         }
@@ -218,11 +246,13 @@ namespace arnoldi::detail {
       if (h[j - 1] < Real(0)) {
         h[j - 1] = -h[j - 1];
         if (j < k + np)
-          detail::Ops<Scalar>::rscal(n, Real(-1), &v[j * ldv], 1);
+          detail::Ops<Scalar, Backend>::rscal(bref, n, Real(-1), &v[j * ldv], 1);
         else
-          detail::Ops<Scalar>::rscal(n, Real(-1), resid, 1);
+          detail::Ops<Scalar, Backend>::rscal(bref, n, Real(-1), resid, 1);
       }
     }
+
+    flush_hdiag(k + np);
 
     detail::arscnd(t1);
     detail::stats.aitr += (t1 - t0);
@@ -238,9 +268,9 @@ namespace arnoldi::detail {
 
   // sapps — implicit QR shifts for symmetric/Hermitian Lanczos.
   // Scalar-aware: Givens rotations on Real h/q, final V update on Scalar.
-  template <typename Scalar>
-  void sapps(int n, int kev, int np, detail::real_t<Scalar>* shift, Scalar* v, int ldv, detail::real_t<Scalar>* h, int ldh,
-             Scalar* resid, detail::real_t<Scalar>* q, int ldq, Scalar* workd) {
+  template <typename Scalar, typename Backend = detail::CpuBackend>
+  void sapps(detail::BackendRef<Backend> bref, int n, int kev, int np, detail::real_t<Scalar>* shift, Scalar* v, int ldv,
+             detail::real_t<Scalar>* h, int ldh, Scalar* resid, detail::real_t<Scalar>* q, int ldq, Scalar* workd) {
     using Real     = detail::real_t<Scalar>;
     const Real one = Real(1), zero = Real(0);
 
@@ -355,21 +385,22 @@ namespace arnoldi::detail {
     }
 
     // V_new = V * Q and resid update.
-    if (h[kev] > zero) detail::Ops<Scalar>::gemv_rv("N", n, kplusp, one, v, ldv, &q[kev * ldq], 1, zero, &workd[n], 1);
+    if (h[kev] > zero)
+      detail::Ops<Scalar, Backend>::gemv_rv(bref, "N", n, kplusp, one, v, ldv, &q[kev * ldq], 1, zero, &workd[n], 1);
 
     for (i = 1; i <= kev; i++) {
-      detail::Ops<Scalar>::gemv_rv("N", n, kplusp - i + 1, one, v, ldv, &q[(kev - i) * ldq], 1, zero, workd, 1);
-      detail::Ops<Scalar>::copy(n, workd, 1, &v[(kplusp - i) * ldv], 1);
+      detail::Ops<Scalar, Backend>::gemv_rv(bref, "N", n, kplusp - i + 1, one, v, ldv, &q[(kev - i) * ldq], 1, zero, workd, 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, workd, 1, &v[(kplusp - i) * ldv], 1);
     }
 
     for (i = 1; i <= kev; i++) {
-      detail::Ops<Scalar>::copy(n, &v[(np + i - 1) * ldv], 1, &v[(i - 1) * ldv], 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, &v[(np + i - 1) * ldv], 1, &v[(i - 1) * ldv], 1);
     }
 
-    if (h[kev] > zero) detail::Ops<Scalar>::copy(n, &workd[n], 1, &v[kev * ldv], 1);
+    if (h[kev] > zero) detail::Ops<Scalar, Backend>::copy(bref, n, &workd[n], 1, &v[kev * ldv], 1);
 
-    detail::Ops<Scalar>::rscal(n, q[(kev - 1) * ldq + kplusp - 1], resid, 1);
-    if (h[kev] > zero) detail::Ops<Scalar>::raxpy(n, h[kev], &v[kev * ldv], 1, resid, 1);
+    detail::Ops<Scalar, Backend>::rscal(bref, n, q[(kev - 1) * ldq + kplusp - 1], resid, 1);
+    if (h[kev] > zero) detail::Ops<Scalar, Backend>::raxpy(bref, n, h[kev], &v[kev * ldv], 1, resid, 1);
 
     if (msglvl > 1) {
       detail::debug.vout(1, &q[(kev - 1) * ldq + kplusp - 1], "_sapps: sigmak of the updated residual vector");
@@ -385,11 +416,12 @@ namespace arnoldi::detail {
   }
 
   // saup2 — main Lanczos iteration driver (symmetric / Hermitian).
-  template <typename Scalar, typename OP, typename BOP, typename Comm>
-  void saup2(const char* bmat, int n, const char* which, int& nev, int& np, detail::real_t<Scalar> tol, Scalar* resid, int mode,
-             int iupd, int ishift, int& mxiter, Scalar* v, int ldv, detail::real_t<Scalar>* h, int ldh,
-             detail::real_t<Scalar>* ritz, detail::real_t<Scalar>* bounds, detail::real_t<Scalar>* q, int ldq,
-             detail::real_t<Scalar>* workl, Scalar* workd, int& info, OP&& op, BOP&& bop, const Comm& comm) {
+  template <typename Scalar, typename Backend = detail::CpuBackend, typename OP, typename BOP, typename Comm>
+  void saup2(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int& nev, int& np,
+             detail::real_t<Scalar> tol, Scalar* resid, int mode, int iupd, int ishift, int& mxiter, Scalar* v, int ldv,
+             detail::real_t<Scalar>* h, int ldh, detail::real_t<Scalar>* ritz, detail::real_t<Scalar>* bounds,
+             detail::real_t<Scalar>* q, int ldq, detail::real_t<Scalar>* workl, Scalar* workd, int& info, OP&& op, BOP&& bop,
+             const Comm& comm) {
     using Real = detail::real_t<Scalar>;
     double t0, t1, t2, t3;
     detail::arscnd(t0);
@@ -415,14 +447,14 @@ namespace arnoldi::detail {
       detail::stats.aup2 = t1 - t0;
     };
 
-    getv0<Scalar>(bmat, 1, initv, n, 1, v, ldv, resid, rnorm, workd, info, op, bop, comm);
+    getv0<Scalar, Backend>(bref, bmat, 1, initv, n, 1, v, ldv, resid, rnorm, workd, info, op, bop, comm);
     if (rnorm == Real(0)) {
       info = -9;
       end_saup2();
       return;
     }
 
-    saitr<Scalar>(bmat, n, 0, nev0, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
+    saitr<Scalar, Backend>(bref, bmat, n, 0, nev0, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
     if (info > 0) {
       np     = info;
       mxiter = iter;
@@ -441,7 +473,7 @@ namespace arnoldi::detail {
         detail::debug.ivout(1, &np, "_saup2: Extend the Lanczos factorization by");
       }
 
-      saitr<Scalar>(bmat, n, nev, np, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
+      saitr<Scalar, Backend>(bref, bmat, n, nev, np, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
       if (info > 0) {
         np     = info;
         mxiter = iter;
@@ -563,18 +595,18 @@ namespace arnoldi::detail {
         }
       }
 
-      sapps<Scalar>(n, nev, np, ritz, v, ldv, h, ldh, resid, q, ldq, workd);
+      sapps<Scalar, Backend>(bref, n, nev, np, ritz, v, ldv, h, ldh, resid, q, ldq, workd);
 
       detail::arscnd(t2);
       if (*bmat == 'G') {
         detail::stats.nbx++;
-        detail::Ops<Scalar>::copy(n, resid, 1, &workd[n], 1);
+        detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &workd[n], 1);
         bop(&workd[n], workd);
-        rnorm = detail::prdotc<Scalar>(comm, n, resid, 1, workd, 1);
+        rnorm = detail::prdotc<Scalar, Backend>(bref, comm, n, resid, 1, workd, 1);
         rnorm = std::sqrt(std::abs(rnorm));
       } else {
-        detail::Ops<Scalar>::copy(n, resid, 1, workd, 1);
-        rnorm = detail::pnrm2<Scalar>(comm, n, resid, 1);
+        detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, workd, 1);
+        rnorm = detail::pnrm2<Scalar, Backend>(bref, comm, n, resid, 1);
       }
       if (*bmat == 'G') {
         detail::arscnd(t3);
@@ -598,10 +630,10 @@ namespace arnoldi::detail {
   // saupd — symmetric/Hermitian eigensolver entry point (callback).
   // Scalar = double|float for real, complex<T> for Hermitian.
   // workd is Scalar* (3n), workl is detail::real_t<Scalar>* (ncv^2 + 8*ncv).
-  template <typename Scalar, typename OP, typename BOP, typename Comm>
-  void saupd(const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar>& tol, Scalar* resid, int ncv, Scalar* v,
-             int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl, int lworkl, int& info, OP&& op,
-             BOP&& bop, const Comm& comm) {
+  template <typename Scalar, typename Backend = detail::CpuBackend, typename OP, typename BOP, typename Comm>
+  void saupd(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar>& tol,
+             Scalar* resid, int ncv, Scalar* v, int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl,
+             int lworkl, int& info, OP&& op, BOP&& bop, const Comm& comm) {
     using Real = detail::real_t<Scalar>;
     detail::stats.reset();
     double t0, t1;
@@ -665,8 +697,8 @@ namespace arnoldi::detail {
     ipntr[6]   = bounds + 1;
     ipntr[10]  = iw + 1;
 
-    saup2<Scalar>(bmat, n, which, nev0, np, tol, resid, mode, iupd, ishift, mxiter, v, ldv, &workl[ih], ldh, &workl[ritz],
-                  &workl[bounds], &workl[iq], ldq, &workl[iw], workd, info, op, bop, comm);
+    saup2<Scalar, Backend>(bref, bmat, n, which, nev0, np, tol, resid, mode, iupd, ishift, mxiter, v, ldv, &workl[ih], ldh,
+                           &workl[ritz], &workl[bounds], &workl[iq], ldq, &workl[iw], workd, info, op, bop, comm);
 
     iparam[2]  = mxiter;
     iparam[4]  = np;
@@ -699,30 +731,56 @@ namespace arnoldi::detail {
   }
 
   // op + bop, no comm (defaults to SerialComm).
+  template <typename Scalar, typename Backend = detail::CpuBackend, typename OP, typename BOP>
+  void saupd(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar>& tol,
+             Scalar* resid, int ncv, Scalar* v, int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl,
+             int lworkl, int& info, OP&& op, BOP&& bop) {
+    saupd<Scalar, Backend>(bref, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info,
+                           std::forward<OP>(op), std::forward<BOP>(bop), SerialComm{});
+  }
+
+  // Standard problem (bmat='I'), no bop, no comm.
+  template <typename Scalar, typename Backend = detail::CpuBackend, typename OP>
+  void saupd(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar>& tol,
+             Scalar* resid, int ncv, Scalar* v, int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl,
+             int lworkl, int& info, OP&& op) {
+    saupd<Scalar, Backend>(
+        bref, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op),
+        [](const Scalar*, Scalar*) {}, SerialComm{});
+  }
+
+  // ---------------------------------------------------------------------------
+  // saupd no-BackendRef overloads — defaults to CpuBackend for the historical
+  // public callback API (tests, examples).
+  template <typename Scalar, typename OP, typename BOP, typename Comm>
+  void saupd(const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar>& tol, Scalar* resid, int ncv, Scalar* v,
+             int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl, int lworkl, int& info, OP&& op,
+             BOP&& bop, const Comm& comm) {
+    saupd<Scalar, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, bmat, n, which, nev, tol, resid, ncv, v, ldv,
+                                      iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op), std::forward<BOP>(bop),
+                                      comm);
+  }
   template <typename Scalar, typename OP, typename BOP>
   void saupd(const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar>& tol, Scalar* resid, int ncv, Scalar* v,
              int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl, int lworkl, int& info, OP&& op,
              BOP&& bop) {
-    saupd<Scalar>(bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op),
-                  std::forward<BOP>(bop), SerialComm{});
+    saupd<Scalar, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, bmat, n, which, nev, tol, resid, ncv, v, ldv,
+                                      iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op), std::forward<BOP>(bop));
   }
-
-  // Standard problem (bmat='I'), no bop, no comm.
   template <typename Scalar, typename OP>
   void saupd(const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar>& tol, Scalar* resid, int ncv, Scalar* v,
              int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl, int lworkl, int& info, OP&& op) {
-    saupd<Scalar>(
-        bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op),
-        [](const Scalar*, Scalar*) {}, SerialComm{});
+    saupd<Scalar, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, bmat, n, which, nev, tol, resid, ncv, v, ldv,
+                                      iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op));
   }
 
   // seupd — symmetric/Hermitian eigenvector extraction (callback).
   // d is Real* (eigenvalues), z is Scalar* (eigenvectors).
-  template <typename Scalar, typename Comm>
-  void seupd(bool rvec, const char* howmny, detail::real_t<Scalar>* d, Scalar* z, int ldz, detail::real_t<Scalar> sigma,
-             const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar> tol, Scalar* resid, int ncv, Scalar* v,
-             int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl, int lworkl, int& info,
-             const Comm& comm) {
+  template <typename Scalar, typename Backend = detail::CpuBackend, typename Comm>
+  void seupd(detail::BackendRef<Backend> bref, bool rvec, const char* howmny, detail::real_t<Scalar>* d, Scalar* z, int ldz,
+             detail::real_t<Scalar> sigma, const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar> tol,
+             Scalar* resid, int ncv, Scalar* v, int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl,
+             int lworkl, int& info, const Comm& comm) {
     using Real = detail::real_t<Scalar>;
 
     char type[7];
@@ -793,7 +851,7 @@ namespace arnoldi::detail {
     if (*bmat == 'I')
       bnorm2 = rnorm;
     else
-      bnorm2 = detail::pnrm2<Scalar>(comm, n, workd, 1);
+      bnorm2 = detail::pnrm2<Scalar, Backend>(bref, comm, n, workd, 1);
 
     std::vector<int> select(ncv, 0);
 
@@ -890,22 +948,44 @@ namespace arnoldi::detail {
     }
 
     if (rvec && *howmny == 'A') {
-      // z = V * S (Scalar V times Real eigenvector matrix S). When z
-      // aliases v, a column-by-column multiply would destroy V columns
-      // before they are fully consumed; use a temporary in that case.
+      // z = V * S (Scalar V times Real eigenvector matrix S = workl[iq..]).
+      // When z aliases v, the GEMM source/destination would overlap; copy V
+      // into a tmpbuf in that case so the GEMM has a clean source.
       Scalar*             vbuf = v;
       std::vector<Scalar> tmpbuf;
       if (z == v) {
         tmpbuf.resize(static_cast<std::size_t>(ldv) * ncv);
-        detail::Ops<Scalar>::copy(ldv * ncv, v, 1, tmpbuf.data(), 1);
+        detail::Ops<Scalar, Backend>::copy(bref, ldv * ncv, v, 1, tmpbuf.data(), 1);
         vbuf = tmpbuf.data();
       }
-      for (j = 0; j < nconv; j++) {
-        for (int ii = 0; ii < n; ii++) z[j * ldz + ii] = Scalar(0);
-        for (k = 0; k < ncv; k++) {
-          detail::Ops<Scalar>::raxpy(n, workl[iq + j * ldq + k], &vbuf[k * ldv], 1, &z[j * ldz], 1);
-        }
+
+      // S is Real, ncv-rows × nconv-cols, column-major, leading dim ldq.
+      // For real Scalar, S has the right storage type already; for complex
+      // Scalar, widen S to Scalar (im = 0) on the host first.
+      std::vector<Scalar> S_host(static_cast<std::size_t>(ldq) * nconv);
+      if constexpr (std::is_same_v<Scalar, Real>) {
+        for (j = 0; j < ldq * nconv; j++) S_host[j] = workl[iq + j];
+      } else {
+        for (j = 0; j < nconv; j++)
+          for (k = 0; k < ncv; k++) S_host[j * ldq + k] = Scalar(workl[iq + j * ldq + k], 0);
       }
+
+      // Under CpuBackend the gemm consumes S directly from the host buffer.
+      // Under a device backend we upload S into a backend-typed buffer first;
+      // the cuBLAS gemm requires all three operands to be device pointers.
+      // S is small (ldq*nconv <= ncv²), so the upload cost is negligible.
+      typename detail::buffer_traits<Backend, Scalar>::vector_type S_buf;
+      const Scalar*                                                S_ptr;
+      if constexpr (std::is_same_v<Backend, detail::CpuBackend>) {
+        S_ptr = S_host.data();
+      } else {
+        S_buf.assign(static_cast<std::size_t>(ldq) * nconv, Scalar{});
+        detail::buffer_traits<Backend, Scalar>::copy_from_host(S_buf, S_host.data(),
+                                                               static_cast<std::size_t>(ldq) * nconv);
+        S_ptr = S_buf.data();
+      }
+
+      detail::Ops<Scalar, Backend>::gemm(bref, "N", "N", n, nconv, ncv, Scalar(1), vbuf, ldv, S_ptr, ldq, Scalar(0), z, ldz);
 
       // Last-row weights for error bounds.
       for (j = 1; j <= ncv - 1; j++) workl[ihb + j - 1] = Real(0);
@@ -941,18 +1021,37 @@ namespace arnoldi::detail {
 
     if (rvec && std::strcmp(type, "REGULR") != 0) {
       for (k = 0; k < nconv; k++) {
-        detail::Ops<Scalar>::raxpy(n, workl[iw + k], resid, 1, &z[k * ldz], 1);
+        detail::Ops<Scalar, Backend>::raxpy(bref, n, workl[iw + k], resid, 1, &z[k * ldz], 1);
       }
     }
   }
 
   // seupd without Comm (defaults to SerialComm).
+  template <typename Scalar, typename Backend = detail::CpuBackend>
+  void seupd(detail::BackendRef<Backend> bref, bool rvec, const char* howmny, detail::real_t<Scalar>* d, Scalar* z, int ldz,
+             detail::real_t<Scalar> sigma, const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar> tol,
+             Scalar* resid, int ncv, Scalar* v, int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl,
+             int lworkl, int& info) {
+    seupd<Scalar, Backend>(bref, rvec, howmny, d, z, ldz, sigma, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr,
+                           workd, workl, lworkl, info, SerialComm{});
+  }
+
+  // seupd no-BackendRef overloads — defaults to CpuBackend for the historical
+  // public callback API (tests, examples).
+  template <typename Scalar, typename Comm>
+  void seupd(bool rvec, const char* howmny, detail::real_t<Scalar>* d, Scalar* z, int ldz, detail::real_t<Scalar> sigma,
+             const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar> tol, Scalar* resid, int ncv, Scalar* v,
+             int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl, int lworkl, int& info,
+             const Comm& comm) {
+    seupd<Scalar, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, rvec, howmny, d, z, ldz, sigma, bmat, n, which,
+                                      nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info, comm);
+  }
   template <typename Scalar>
   void seupd(bool rvec, const char* howmny, detail::real_t<Scalar>* d, Scalar* z, int ldz, detail::real_t<Scalar> sigma,
              const char* bmat, int n, const char* which, int nev, detail::real_t<Scalar> tol, Scalar* resid, int ncv, Scalar* v,
              int ldv, int* iparam, int* ipntr, Scalar* workd, detail::real_t<Scalar>* workl, int lworkl, int& info) {
-    seupd<Scalar>(rvec, howmny, d, z, ldz, sigma, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl,
-                  lworkl, info, SerialComm{});
+    seupd<Scalar, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, rvec, howmny, d, z, ldz, sigma, bmat, n, which,
+                                      nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info);
   }
 
 }  // namespace arnoldi::detail

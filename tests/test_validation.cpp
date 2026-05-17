@@ -7,139 +7,112 @@
 #include <stdexcept>
 #include <string>
 
-static int g_pass = 0, g_fail = 0;
+#include <catch2/catch_test_macros.hpp>
 
-template<typename F>
+// Catch2-backed expectation helpers. Signatures unchanged so the existing
+// call sites need no edits; assertions are recorded against the running
+// TEST_CASE. expect_throw requires a std::invalid_argument whose message
+// contains `substr` (when non-empty).
+template <typename F>
 void expect_throw(const char* name, F&& f, const std::string& substr = "") {
+    INFO(name);
     try {
         f();
-        std::printf("  FAIL  %s — no exception thrown\n", name);
-        ++g_fail;
+        FAIL("no exception thrown");
     } catch (const std::invalid_argument& e) {
-        if (!substr.empty() && std::string(e.what()).find(substr) == std::string::npos) {
-            std::printf("  FAIL  %s — wrong message: %s\n", name, e.what());
-            ++g_fail;
-        } else {
-            std::printf("  OK    %s\n", name);
-            ++g_pass;
-        }
+        INFO("message: " << e.what());
+        if (!substr.empty())
+            CHECK(std::string(e.what()).find(substr) != std::string::npos);
+        else
+            SUCCEED();
     } catch (const std::exception& e) {
-        std::printf("  FAIL  %s — unexpected exception: %s\n", name, e.what());
-        ++g_fail;
+        FAIL("unexpected exception: " << e.what());
     }
 }
 
-template<typename F>
+template <typename F>
 void expect_no_throw(const char* name, F&& f) {
+    INFO(name);
     try {
         f();
-        std::printf("  OK    %s\n", name);
-        ++g_pass;
+        SUCCEED();
     } catch (const std::exception& e) {
-        std::printf("  FAIL  %s — exception: %s\n", name, e.what());
-        ++g_fail;
+        FAIL("exception: " << e.what());
     }
 }
 
-void test_n_zero() {
+TEST_CASE("test_n_zero", "[validation]") {
     expect_throw("Sym: n=0", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 0, "LM", 1, 3); }, "n must be");
 }
-void test_n_negative() {
+TEST_CASE("test_n_negative", "[validation]") {
     expect_throw("Sym: n=-1", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", -1, "LM", 1, 3); }, "n must be");
 }
 
-void test_nev_zero() {
+TEST_CASE("test_nev_zero", "[validation]") {
     expect_throw("Sym: nev=0", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 10, "LM", 0, 5); }, "nev must be");
 }
-void test_nev_negative() {
+TEST_CASE("test_nev_negative", "[validation]") {
     expect_throw("Nonsym: nev=-1", []{ arnoldi::Arnoldi<arnoldi::Kind::Nonsym, double>("I", 10, "LM", -1, 5); }, "nev must be");
 }
 
-void test_ncv_too_large() {
+TEST_CASE("test_ncv_too_large", "[validation]") {
     expect_throw("Sym: ncv > n", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 5, "LM", 2, 10); }, "ncv must be <= global");
 }
-void test_ncv_sym_too_small() {
+TEST_CASE("test_ncv_sym_too_small", "[validation]") {
     expect_throw("Sym: ncv == nev", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 20, "LM", 5, 5); }, "ncv must satisfy");
 }
-void test_ncv_nonsym_too_small() {
+TEST_CASE("test_ncv_nonsym_too_small", "[validation]") {
     expect_throw("Nonsym: ncv == nev+1", []{ arnoldi::Arnoldi<arnoldi::Kind::Nonsym, double>("I", 20, "LM", 4, 5); }, "ncv must satisfy");
 }
-void test_ncv_nonsym_boundary() {
+TEST_CASE("test_ncv_nonsym_boundary", "[validation]") {
     expect_no_throw("Nonsym: ncv == nev+2 (valid)", []{ arnoldi::Arnoldi<arnoldi::Kind::Nonsym, double>("I", 20, "LM", 4, 6); });
 }
-void test_ncv_sym_boundary() {
+TEST_CASE("test_ncv_sym_boundary", "[validation]") {
     expect_no_throw("Sym: ncv == nev+1 (valid)", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 20, "LM", 5, 6); });
 }
 
-void test_bmat_invalid() {
+TEST_CASE("test_bmat_invalid", "[validation]") {
     expect_throw("Sym: bmat='X'", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("X", 10, "LM", 2, 5); }, "bmat must be");
 }
-void test_bmat_empty() {
+TEST_CASE("test_bmat_empty", "[validation]") {
     expect_throw("Sym: bmat=''", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("", 10, "LM", 2, 5); }, "bmat must be");
 }
-void test_bmat_generalized() {
+TEST_CASE("test_bmat_generalized", "[validation]") {
     expect_no_throw("Sym: bmat='G' (valid)", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("G", 10, "LM", 2, 5); });
 }
 
-void test_which_sym_invalid() {
+TEST_CASE("test_which_sym_invalid", "[validation]") {
     expect_throw("Sym: which='XX'", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 10, "XX", 2, 5); }, "which must be");
 }
-void test_which_sym_LI() {
+TEST_CASE("test_which_sym_LI", "[validation]") {
     // LI is valid for Nonsym but not Sym.
     expect_throw("Sym: which='LI'", []{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 10, "LI", 2, 5); }, "which must be");
 }
-void test_which_sym_all_valid() {
+TEST_CASE("test_which_sym_all_valid", "[validation]") {
     for (auto w : {"LM", "SM", "LA", "SA", "BE"}) {
         std::string name = std::string("Sym: which='") + w + "'";
         expect_no_throw(name.c_str(), [w]{ arnoldi::Arnoldi<arnoldi::Kind::Sym, double>("I", 20, w, 2, 5); });
     }
 }
 
-void test_which_nonsym_invalid() {
+TEST_CASE("test_which_nonsym_invalid", "[validation]") {
     expect_throw("Nonsym: which='LA'", []{ arnoldi::Arnoldi<arnoldi::Kind::Nonsym, double>("I", 20, "LA", 2, 5); }, "which must be");
 }
-void test_which_nonsym_all_valid() {
+TEST_CASE("test_which_nonsym_all_valid", "[validation]") {
     for (auto w : {"LM", "SM", "LR", "SR", "LI", "SI"}) {
         std::string name = std::string("Nonsym: which='") + w + "'";
         expect_no_throw(name.c_str(), [w]{ arnoldi::Arnoldi<arnoldi::Kind::Nonsym, double>("I", 20, w, 2, 5); });
     }
 }
 
-void test_which_herm_invalid() {
+TEST_CASE("test_which_herm_invalid", "[validation]") {
     using cplx = std::complex<double>;
     expect_throw("Herm: which='LI'", []{ arnoldi::Arnoldi<arnoldi::Kind::Herm, cplx>("I", 20, "LI", 2, 5); }, "which must be");
 }
-void test_which_herm_all_valid() {
+TEST_CASE("test_which_herm_all_valid", "[validation]") {
     using cplx = std::complex<double>;
     for (auto w : {"LM", "SM", "LA", "SA", "BE"}) {
         std::string name = std::string("Herm: which='") + w + "'";
         expect_no_throw(name.c_str(), [w]{ arnoldi::Arnoldi<arnoldi::Kind::Herm, cplx>("I", 20, w, 2, 5); });
     }
-}
-
-int main() {
-    std::printf("test_validation:\n");
-
-    test_n_zero();
-    test_n_negative();
-    test_nev_zero();
-    test_nev_negative();
-    test_ncv_too_large();
-    test_ncv_sym_too_small();
-    test_ncv_nonsym_too_small();
-    test_ncv_nonsym_boundary();
-    test_ncv_sym_boundary();
-    test_bmat_invalid();
-    test_bmat_empty();
-    test_bmat_generalized();
-    test_which_sym_invalid();
-    test_which_sym_LI();
-    test_which_sym_all_valid();
-    test_which_nonsym_invalid();
-    test_which_nonsym_all_valid();
-    test_which_herm_invalid();
-    test_which_herm_all_valid();
-
-    std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
-    return g_fail > 0 ? 1 : 0;
 }

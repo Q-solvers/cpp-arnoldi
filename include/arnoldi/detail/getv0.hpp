@@ -10,9 +10,9 @@ namespace arnoldi::detail {
   // getv0 — generate a starting vector (shared by sym / nonsym).
   // Replaces the reverse-communication version: callbacks op/bop are
   // invoked directly instead of returning ido.
-  template <typename Scalar, typename OP, typename BOP, typename Comm>
-  void getv0(const char* bmat, int itry, bool initv, int n, int j, Scalar* v, int ldv, Scalar* resid,
-             detail::real_t<Scalar>& rnorm, Scalar* workd, int& ierr, OP&& op, BOP&& bop, const Comm& comm) {
+  template <typename Scalar, typename Backend = detail::CpuBackend, typename OP, typename BOP, typename Comm>
+  void getv0(detail::BackendRef<Backend> bref, const char* bmat, int itry, bool initv, int n, int j, Scalar* v, int ldv,
+             Scalar* resid, detail::real_t<Scalar>& rnorm, Scalar* workd, int& ierr, OP&& op, BOP&& bop, const Comm& comm) {
     using Real          = detail::real_t<Scalar>;
     static int iseed[4] = {1, 3, 5, 7};
     int        msglvl   = detail::debug.getv0;
@@ -22,25 +22,25 @@ namespace arnoldi::detail {
     ierr = 0;
 
     if (!initv) {
-      detail::Ops<Scalar>::larnv(2, iseed, n, resid);
+      detail::Ops<Scalar, Backend>::larnv(bref, 2, iseed, n, resid);
     }
 
     if (itry == 1) {
       detail::stats.nopx++;
       detail::arscnd(t2);
-      detail::Ops<Scalar>::copy(n, resid, 1, workd, 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, workd, 1);
       op(workd, &workd[n]);
       if (*bmat == 'G') {
         detail::arscnd(t3);
         detail::stats.mvopx += (t3 - t2);
       }
-      detail::Ops<Scalar>::copy(n, &workd[n], 1, resid, 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, &workd[n], 1, resid, 1);
     } else if (itry > 1 && *bmat == 'G') {
-      detail::Ops<Scalar>::copy(n, resid, 1, &workd[n], 1);
+      detail::Ops<Scalar, Backend>::copy(bref, n, resid, 1, &workd[n], 1);
     }
 
     detail::arscnd(t2);
-    Real rnorm0 = detail::bnorm<Scalar>(*bmat, n, resid, workd, &workd[n], bop, comm);
+    Real rnorm0 = detail::bnorm<Scalar, Backend>(bref, *bmat, n, resid, workd, &workd[n], bop, comm);
     if (*bmat == 'G') {
       detail::arscnd(t3);
       detail::stats.mvbx += (t3 - t2);
@@ -49,13 +49,13 @@ namespace arnoldi::detail {
 
     if (j != 1) {
       for (int iter = 0;; ++iter) {
-        detail::Ops<Scalar>::gemv(detail::Ops<Scalar>::herm_trans(), n, j - 1, Scalar(1), v, ldv, workd, 1, Scalar(0), &workd[n],
-                                  1);
-        comm.allreduce_sum(&workd[n], j - 1);
-        detail::Ops<Scalar>::gemv("N", n, j - 1, Scalar(-1), v, ldv, &workd[n], 1, Scalar(1), resid, 1);
+        detail::Ops<Scalar, Backend>::gemv(bref, detail::Ops<Scalar, Backend>::herm_trans(), n, j - 1, Scalar(1), v, ldv, workd, 1,
+                                           Scalar(0), &workd[n], 1);
+        detail::backend_allreduce(bref, comm, &workd[n], j - 1);
+        detail::Ops<Scalar, Backend>::gemv(bref, "N", n, j - 1, Scalar(-1), v, ldv, &workd[n], 1, Scalar(1), resid, 1);
 
         detail::arscnd(t2);
-        rnorm = detail::bnorm<Scalar>(*bmat, n, resid, workd, &workd[n], bop, comm);
+        rnorm = detail::bnorm<Scalar, Backend>(bref, *bmat, n, resid, workd, &workd[n], bop, comm);
         if (*bmat == 'G') {
           detail::arscnd(t3);
           detail::stats.mvbx += (t3 - t2);
@@ -65,7 +65,7 @@ namespace arnoldi::detail {
 
         rnorm0 = rnorm;
         if (iter >= 5) {
-          for (int jj = 0; jj < n; jj++) resid[jj] = Scalar(0);
+          detail::Ops<Scalar, Backend>::zero(bref, n, resid);
           rnorm = Real(0);
           ierr  = -1;
           break;
@@ -82,6 +82,15 @@ namespace arnoldi::detail {
 
     detail::arscnd(t1);
     detail::stats.getv0 += (t1 - t0);
+  }
+
+  // getv0 without explicit BackendRef — defaults to CpuBackend, for the
+  // historical public callback API (tests, examples).
+  template <typename Scalar, typename OP, typename BOP, typename Comm>
+  void getv0(const char* bmat, int itry, bool initv, int n, int j, Scalar* v, int ldv, Scalar* resid,
+             detail::real_t<Scalar>& rnorm, Scalar* workd, int& ierr, OP&& op, BOP&& bop, const Comm& comm) {
+    getv0<Scalar, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, bmat, itry, initv, n, j, v, ldv, resid, rnorm,
+                                      workd, ierr, std::forward<OP>(op), std::forward<BOP>(bop), comm);
   }
 
 }  // namespace arnoldi::detail

@@ -131,14 +131,12 @@ static bool test_debug_output() {
     return true;
 }
 
-int main() {
-    std::printf("test_getv0:\n");
-    bool ok = true;
-    ok &= test_basic();
-    ok &= test_generalized_retry();
-    ok &= test_orthogonalization();
-    ok &= test_orthogonalization_generalized();
-    ok &= test_debug_output();
-    std::printf("%s\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
-}
+#include <catch2/catch_test_macros.hpp>
+
+// The helpers above return bool and print their own progress; wrap each as
+// a Catch2 test case so they're individually discovered and reported.
+TEST_CASE("getv0 basic", "[getv0]") { CHECK(test_basic()); }
+TEST_CASE("getv0 generalized retry", "[getv0]") { CHECK(test_generalized_retry()); }
+TEST_CASE("getv0 orthogonalization", "[getv0]") { CHECK(test_orthogonalization()); }
+TEST_CASE("getv0 orthogonalization generalized", "[getv0]") { CHECK(test_orthogonalization_generalized()); }
+TEST_CASE("getv0 debug output", "[getv0]") { CHECK(test_debug_output()); }

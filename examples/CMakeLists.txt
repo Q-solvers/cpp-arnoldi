@@ -4,6 +4,10 @@ if(ARNOLDI_BUILD_EXAMPLES)
     add_executable(example_symmetric_laplacian symmetric_laplacian.cpp)
     target_link_libraries(example_symmetric_laplacian PRIVATE arnoldi)
 
+    # CPU twin of arnoldi_sym_cuda — same problem, for backend benchmarking.
+    add_executable(example_arnoldi_sym_cpu arnoldi_sym_cpu.cpp)
+    target_link_libraries(example_arnoldi_sym_cpu PRIVATE arnoldi)
+
     # Class-based Arnoldi<Kind, Scalar> demos (one per kind)
     foreach(_demo IN ITEMS arnoldi_sym arnoldi_nonsym arnoldi_herm)
         add_executable(example_${_demo} ${_demo}.cpp)
@@ -17,6 +21,16 @@ if(ARNOLDI_BUILD_EXAMPLES)
         target_include_directories(example_${_demo} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_link_libraries(example_${_demo} PRIVATE arnoldi)
     endforeach()
+
+    # CUDA device-matvec example (only when the CUDA backend is enabled)
+    if(ARNOLDI_USE_CUDA)
+        enable_language(CUDA)
+        add_executable(example_arnoldi_sym_cuda arnoldi_sym_cuda.cu)
+        set_target_properties(example_arnoldi_sym_cuda PROPERTIES
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON)
+        target_link_libraries(example_arnoldi_sym_cuda PRIVATE arnoldi)
+    endif()
 
     # MPI parallel example (optional — only if MPI found)
     find_package(MPI COMPONENTS CXX QUIET)

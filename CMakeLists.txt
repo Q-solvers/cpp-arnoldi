@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ARNOLDI_BUILD_EXAMPLES "Build example programs" OFF)
 option(ARNOLDI_REGRESSION "Build regression benchmark against original ARPACK (requires arpackng)" OFF)
+option(ARNOLDI_USE_CUDA "Build with CUDA + cuBLAS backend (Sym / Herm only)" OFF)
 
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
@@ -23,6 +24,14 @@ if(TARGET BLAS::BLAS AND TARGET LAPACK::LAPACK)
     target_link_libraries(arnoldi INTERFACE BLAS::BLAS LAPACK::LAPACK)
 else()
     target_link_libraries(arnoldi INTERFACE ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+endif()
+
+if(ARNOLDI_USE_CUDA)
+    # cuBLAS / cudart are C-API libraries; no nvcc required for the wrappers.
+    find_package(CUDAToolkit REQUIRED)
+    target_link_libraries(arnoldi INTERFACE CUDA::cudart CUDA::cublas)
+    target_compile_definitions(arnoldi INTERFACE ARNOLDI_USE_CUDA)
+    message(STATUS "Arnoldi: CUDA backend enabled (cuBLAS=${CUDAToolkit_VERSION})")
 endif()
 
 include(GNUInstallDirs)

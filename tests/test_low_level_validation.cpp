@@ -13,16 +13,14 @@
 #include <cstdio>
 #include <vector>
 
-static int g_pass = 0, g_fail = 0;
+#include <catch2/catch_test_macros.hpp>
 
+// Catch2-backed check(): the optional got/want ints are surfaced as scoped
+// INFO context (only printed on failure). Valid inside helper functions
+// because Catch2 records the assertion against the running TEST_CASE.
 static void check(const char* name, bool cond, int got = 0, int want = 0) {
-    if (cond) {
-        std::printf("  OK    %s\n", name);
-        ++g_pass;
-    } else {
-        std::printf("  FAIL  %s (got info=%d, want=%d)\n", name, got, want);
-        ++g_fail;
-    }
+    INFO(name << " (got info=" << got << ", want=" << want << ")");
+    CHECK(cond);
 }
 
 // Convenience holder for a "valid" workspace; individual fields are then
@@ -89,7 +87,7 @@ struct NaupdHarness {
     }
 };
 
-static void test_saupd_errors() {
+TEST_CASE("test_saupd_errors", "[lowlevel]") {
     {
         SaupdHarness h; h.n = 0;
         check("saupd n<=0  -> -1", h.run() == -1, h.info, -1);
@@ -147,7 +145,7 @@ static void test_saupd_errors() {
     }
 }
 
-static void test_naupd_errors() {
+TEST_CASE("test_naupd_errors", "[lowlevel]") {
     {
         NaupdHarness h; h.n = 0;
         check("naupd n<=0  -> -1", h.run() == -1, h.info, -1);
@@ -206,7 +204,7 @@ static void test_naupd_errors() {
 
 // seupd validates its arguments separately; drive several of those branches.
 // seupd assumes nconv>0 (read from iparam[4]); pre-set it so other checks fire.
-static void test_seupd_errors() {
+TEST_CASE("test_seupd_errors", "[lowlevel]") {
     SaupdHarness base;
     base.iparam[4] = 1;  // nconv
 
@@ -294,7 +292,7 @@ static void test_seupd_errors() {
     }
 }
 
-static void test_neupd_errors() {
+TEST_CASE("test_neupd_errors", "[lowlevel]") {
     NaupdHarness base;
 
     auto run_neupd = [&](const char* bmat, const char* which, int n, int nev, int ncv,
@@ -388,7 +386,7 @@ static void test_neupd_errors() {
 // Drive a real solve all the way through saupd, then call seupd directly with
 // z aliasing v.  Forces the seupd `if (z == v) tmpbuf` allocation branch
 // which the high-level Arnoldi class never triggers (it owns separate buffers).
-static void test_seupd_aliased_z_v() {
+TEST_CASE("test_seupd_aliased_z_v", "[lowlevel]") {
     const int n = 16, nev = 3, ncv = 8;
     int   lworkl = ncv * (ncv + 8);
     double tol   = 0.0;
@@ -427,7 +425,7 @@ static void test_seupd_aliased_z_v() {
 // Call the no-bop, no-comm 3-arg saupd/naupd helper overloads directly.
 // The high-level Arnoldi class always passes a bop lambda so these helper
 // overloads are unreachable through the public API.
-static void test_no_bop_overloads() {
+TEST_CASE("test_no_bop_overloads", "[lowlevel]") {
     {
         const int n = 16, nev = 2, ncv = 8;
         int   lworkl = ncv * (ncv + 8);
@@ -471,7 +469,7 @@ static void test_no_bop_overloads() {
 }
 
 // User-supplied initial residual: covers info_in_=1 path through naupd.
-static void test_user_initial_residual_nonsym() {
+TEST_CASE("test_user_initial_residual_nonsym", "[lowlevel]") {
     const int n = 32, nev = 3, ncv = 12;
     std::vector<double> resid(n, 1.0);
 
@@ -483,17 +481,4 @@ static void test_user_initial_residual_nonsym() {
         y[n - 1] = -x[n - 2] + 2.0 * x[n - 1];
     });
     check("Nonsym user initial resid: solve ok", s.info() >= 0);
-}
-
-int main() {
-    std::printf("test_low_level_validation:\n");
-    test_saupd_errors();
-    test_naupd_errors();
-    test_seupd_errors();
-    test_neupd_errors();
-    test_user_initial_residual_nonsym();
-    test_seupd_aliased_z_v();
-    test_no_bop_overloads();
-    std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
-    return g_fail > 0 ? 1 : 0;
 }

@@ -66,6 +66,18 @@ void cgemv_(const char* trans, const int* m, const int* n, const std::complex<fl
 void dgbmv_(const char* trans, const int* m, const int* n, const int* kl, const int* ku, const double* alpha, const double* a,
             const int* lda, const double* x, const int* incx, const double* beta, double* y, const int* incy);
 
+// ---- BLAS-3 (gemm, all types) ---------------------------------------------
+void dgemm_(const char* transa, const char* transb, const int* m, const int* n, const int* k, const double* alpha, const double* a,
+            const int* lda, const double* b, const int* ldb, const double* beta, double* c, const int* ldc);
+void sgemm_(const char* transa, const char* transb, const int* m, const int* n, const int* k, const float* alpha, const float* a,
+            const int* lda, const float* b, const int* ldb, const float* beta, float* c, const int* ldc);
+void zgemm_(const char* transa, const char* transb, const int* m, const int* n, const int* k, const std::complex<double>* alpha,
+            const std::complex<double>* a, const int* lda, const std::complex<double>* b, const int* ldb,
+            const std::complex<double>* beta, std::complex<double>* c, const int* ldc);
+void cgemm_(const char* transa, const char* transb, const int* m, const int* n, const int* k, const std::complex<float>* alpha,
+            const std::complex<float>* a, const int* lda, const std::complex<float>* b, const int* ldb,
+            const std::complex<float>* beta, std::complex<float>* c, const int* ldc);
+
 // ---- BLAS-2 (ger / geru) --------------------------------------------------
 void dger_(const int* m, const int* n, const double* alpha, const double* x, const int* incx, const double* y, const int* incy,
            double* a, const int* lda);
@@ -238,6 +250,10 @@ inline void dgemv(const char* trans, int m, int n, double alpha, const double* a
                   double* y, int incy) {
   dgemv_(trans, &m, &n, &alpha, a, &lda, x, &incx, &beta, y, &incy);
 }
+inline void dgemm(const char* transa, const char* transb, int m, int n, int k, double alpha, const double* a, int lda,
+                  const double* b, int ldb, double beta, double* c, int ldc) {
+  dgemm_(transa, transb, &m, &n, &k, &alpha, a, &lda, b, &ldb, &beta, c, &ldc);
+}
 inline void   dlarnv(int idist, int* iseed, int n, double* x) { dlarnv_(&idist, iseed, &n, x); }
 inline double dlamch(const char* cmach) { return dlamch_(cmach); }
 inline double dlapy2(double x, double y) { return dlapy2_(&x, &y); }
@@ -264,6 +280,10 @@ inline void   sgemv(const char* trans, int m, int n, float alpha, const float* a
                     float* y, int incy) {
     sgemv_(trans, &m, &n, &alpha, a, &lda, x, &incx, &beta, y, &incy);
 }
+inline void   sgemm(const char* transa, const char* transb, int m, int n, int k, float alpha, const float* a, int lda,
+                    const float* b, int ldb, float beta, float* c, int ldc) {
+    sgemm_(transa, transb, &m, &n, &k, &alpha, a, &lda, b, &ldb, &beta, c, &ldc);
+}
 inline void  slarnv(int idist, int* iseed, int n, float* x) { slarnv_(&idist, iseed, &n, x); }
 inline float slamch(const char* cmach) { return slamch_(cmach); }
 inline float slapy2(float x, float y) { return slapy2_(&x, &y); }
@@ -288,6 +308,11 @@ inline double dznrm2(int n, const std::complex<double>* x, int incx) { return dz
 inline void   zgemv(const char* trans, int m, int n, std::complex<double> alpha, const std::complex<double>* a, int lda,
                     const std::complex<double>* x, int incx, std::complex<double> beta, std::complex<double>* y, int incy) {
     zgemv_(trans, &m, &n, &alpha, a, &lda, x, &incx, &beta, y, &incy);
+}
+inline void   zgemm(const char* transa, const char* transb, int m, int n, int k, std::complex<double> alpha,
+                    const std::complex<double>* a, int lda, const std::complex<double>* b, int ldb, std::complex<double> beta,
+                    std::complex<double>* c, int ldc) {
+    zgemm_(transa, transb, &m, &n, &k, &alpha, a, &lda, b, &ldb, &beta, c, &ldc);
 }
 inline void zlarnv(int idist, int* iseed, int n, std::complex<double>* x) { zlarnv_(&idist, iseed, &n, x); }
 inline void zlacpy(const char* uplo, int m, int n, const std::complex<double>* a, int lda, std::complex<double>* b, int ldb) {
@@ -339,6 +364,11 @@ inline float scnrm2(int n, const std::complex<float>* x, int incx) { return scnr
 inline void  cgemv(const char* trans, int m, int n, std::complex<float> alpha, const std::complex<float>* a, int lda,
                    const std::complex<float>* x, int incx, std::complex<float> beta, std::complex<float>* y, int incy) {
    cgemv_(trans, &m, &n, &alpha, a, &lda, x, &incx, &beta, y, &incy);
+}
+inline void  cgemm(const char* transa, const char* transb, int m, int n, int k, std::complex<float> alpha,
+                   const std::complex<float>* a, int lda, const std::complex<float>* b, int ldb, std::complex<float> beta,
+                   std::complex<float>* c, int ldc) {
+   cgemm_(transa, transb, &m, &n, &k, &alpha, a, &lda, b, &ldb, &beta, c, &ldc);
 }
 inline void clarnv(int idist, int* iseed, int n, std::complex<float>* x) { clarnv_(&idist, iseed, &n, x); }
 inline void clacpy(const char* uplo, int m, int n, const std::complex<float>* a, int lda, std::complex<float>* b, int ldb) {

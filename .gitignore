@@ -42,7 +42,7 @@
 # Build directories
 build/
 Build/
-build-*/
+*build*/
 /cmake-build-*/
 
 # CMake generated files

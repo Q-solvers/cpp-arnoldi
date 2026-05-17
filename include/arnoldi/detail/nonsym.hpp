@@ -19,9 +19,9 @@
 namespace arnoldi::detail {
 
   // naitr — Arnoldi iteration (nonsymmetric).
-  template <typename Real, typename OP, typename BOP, typename Comm>
-  void naitr(const char* bmat, int n, int k, int np, int nb, Real* resid, Real& rnorm, Real* v, int ldv, Real* h, int ldh,
-             Real* workd, int& info, OP&& op, BOP&& bop, const Comm& comm) {
+  template <typename Real, typename Backend = detail::CpuBackend, typename OP, typename BOP, typename Comm>
+  void naitr(detail::BackendRef<Backend> bref, const char* bmat, int n, int k, int np, int nb, Real* resid, Real& rnorm, Real* v,
+             int ldv, Real* h, int ldh, Real* workd, int& info, OP&& op, BOP&& bop, const Comm& comm) {
     const int ipj = 0, irj = n, ivj = 2 * n;
 
     Real      unfl = detail::Ops<Real>::lamch("safe minimum");
@@ -56,7 +56,7 @@ namespace arnoldi::detail {
 
         int ierr = -1;
         for (int itry = 1; itry <= 3; ++itry) {
-          getv0<Real>(bmat, itry, false, n, j, v, ldv, resid, rnorm, workd, ierr, op, bop, comm);
+          getv0<Real, Backend>(bref, bmat, itry, false, n, j, v, ldv, resid, rnorm, workd, ierr, op, bop, comm);
           if (ierr >= 0) break;
         }
         if (ierr < 0) {
@@ -67,27 +67,27 @@ namespace arnoldi::detail {
         }
       }
 
-      detail::Ops<Real>::copy(n, resid, 1, &v[(j - 1) * ldv], 1);
+      detail::Ops<Real, Backend>::copy(bref, n, resid, 1, &v[(j - 1) * ldv], 1);
       if (rnorm >= unfl) {
         Real temp1 = (Real)1 / rnorm;
-        detail::Ops<Real>::scal(n, temp1, &v[(j - 1) * ldv], 1);
-        detail::Ops<Real>::scal(n, temp1, &workd[ipj], 1);
+        detail::Ops<Real, Backend>::scal(bref, n, temp1, &v[(j - 1) * ldv], 1);
+        detail::Ops<Real, Backend>::scal(bref, n, temp1, &workd[ipj], 1);
       } else {
         int  ione = 1;
         int  infol;
         Real done = (Real)1;
-        detail::Ops<Real>::lascl_("General", &ione, &ione, &rnorm, &done, &n, &ione, &v[(j - 1) * ldv], &n, &infol);
-        detail::Ops<Real>::lascl_("General", &ione, &ione, &rnorm, &done, &n, &ione, &workd[ipj], &n, &infol);
+        detail::Ops<Real, Backend>::lascl_(bref, "General", &ione, &ione, &rnorm, &done, &n, &ione, &v[(j - 1) * ldv], &n, &infol);
+        detail::Ops<Real, Backend>::lascl_(bref, "General", &ione, &ione, &rnorm, &done, &n, &ione, &workd[ipj], &n, &infol);
       }
 
       detail::stats.nopx++;
       detail::arscnd(t2);
-      detail::Ops<Real>::copy(n, &v[(j - 1) * ldv], 1, &workd[ivj], 1);
+      detail::Ops<Real, Backend>::copy(bref, n, &v[(j - 1) * ldv], 1, &workd[ivj], 1);
       op(&workd[ivj], &workd[irj]);
       detail::arscnd(t3);
       detail::stats.mvopx += (t3 - t2);
 
-      detail::Ops<Real>::copy(n, &workd[irj], 1, resid, 1);
+      detail::Ops<Real, Backend>::copy(bref, n, &workd[irj], 1, resid, 1);
 
       // B-multiply w = OP*v_j (or copy through if bmat='I').
       detail::arscnd(t2);
@@ -95,7 +95,7 @@ namespace arnoldi::detail {
         detail::stats.nbx++;
         bop(&workd[irj], &workd[ipj]);
       } else {
-        detail::Ops<Real>::copy(n, resid, 1, &workd[ipj], 1);
+        detail::Ops<Real, Backend>::copy(bref, n, resid, 1, &workd[ipj], 1);
       }
       if (bmat[0] == 'G') {
         detail::arscnd(t3);
@@ -104,16 +104,16 @@ namespace arnoldi::detail {
 
       Real wnorm;
       if (bmat[0] == 'G') {
-        wnorm = detail::pdot<Real>(comm, n, resid, 1, &workd[ipj], 1);
+        wnorm = detail::pdot<Real, Backend>(bref, comm, n, resid, 1, &workd[ipj], 1);
         wnorm = std::sqrt(std::abs(wnorm));
       } else {
-        wnorm = detail::pnrm2_real<Real>(comm, n, resid, 1);
+        wnorm = detail::pnrm2_real<Real, Backend>(bref, comm, n, resid, 1);
       }
 
       // h(:,j) = V' * B*w ;  resid -= V * h(:,j)
-      detail::Ops<Real>::gemv("T", n, j, (Real)1, v, ldv, &workd[ipj], 1, (Real)0, &h[(j - 1) * ldh], 1);
-      comm.allreduce_sum(&h[(j - 1) * ldh], j);
-      detail::Ops<Real>::gemv("N", n, j, (Real)-1, v, ldv, &h[(j - 1) * ldh], 1, (Real)1, resid, 1);
+      detail::Ops<Real, Backend>::gemv(bref, "T", n, j, (Real)1, v, ldv, &workd[ipj], 1, (Real)0, &h[(j - 1) * ldh], 1);
+      detail::backend_allreduce(bref, comm, &h[(j - 1) * ldh], j);
+      detail::Ops<Real, Backend>::gemv(bref, "N", n, j, (Real)-1, v, ldv, &h[(j - 1) * ldh], 1, (Real)1, resid, 1);
 
       if (j > 1) h[(j - 2) * ldh + (j - 1)] = betaj;
 
@@ -122,10 +122,10 @@ namespace arnoldi::detail {
       detail::arscnd(t2);
       if (bmat[0] == 'G') {
         detail::stats.nbx++;
-        detail::Ops<Real>::copy(n, resid, 1, &workd[irj], 1);
+        detail::Ops<Real, Backend>::copy(bref, n, resid, 1, &workd[irj], 1);
         bop(&workd[irj], &workd[ipj]);
       } else {
-        detail::Ops<Real>::copy(n, resid, 1, &workd[ipj], 1);
+        detail::Ops<Real, Backend>::copy(bref, n, resid, 1, &workd[ipj], 1);
       }
       if (bmat[0] == 'G') {
         detail::arscnd(t3);
@@ -133,10 +133,10 @@ namespace arnoldi::detail {
       }
 
       if (bmat[0] == 'G') {
-        rnorm = detail::pdot<Real>(comm, n, resid, 1, &workd[ipj], 1);
+        rnorm = detail::pdot<Real, Backend>(bref, comm, n, resid, 1, &workd[ipj], 1);
         rnorm = std::sqrt(std::abs(rnorm));
       } else {
-        rnorm = detail::pnrm2_real<Real>(comm, n, resid, 1);
+        rnorm = detail::pnrm2_real<Real, Backend>(bref, comm, n, resid, 1);
       }
 
       if (rnorm <= 0.717 * wnorm) {
@@ -148,19 +148,19 @@ namespace arnoldi::detail {
             detail::debug.vout(j, &h[(j - 1) * ldh], "_naitr: j-th column of H");
           }
 
-          detail::Ops<Real>::gemv("T", n, j, (Real)1, v, ldv, &workd[ipj], 1, (Real)0, &workd[irj], 1);
-          comm.allreduce_sum(&workd[irj], j);
-          detail::Ops<Real>::gemv("N", n, j, (Real)-1, v, ldv, &workd[irj], 1, (Real)1, resid, 1);
-          detail::Ops<Real>::axpy(j, (Real)1, &workd[irj], 1, &h[(j - 1) * ldh], 1);
+          detail::Ops<Real, Backend>::gemv(bref, "T", n, j, (Real)1, v, ldv, &workd[ipj], 1, (Real)0, &workd[irj], 1);
+          detail::backend_allreduce(bref, comm, &workd[irj], j);
+          detail::Ops<Real, Backend>::gemv(bref, "N", n, j, (Real)-1, v, ldv, &workd[irj], 1, (Real)1, resid, 1);
+          detail::Ops<Real, Backend>::axpy(bref, j, (Real)1, &workd[irj], 1, &h[(j - 1) * ldh], 1);
 
           detail::arscnd(t2);
           Real rnorm1;
           if (bmat[0] == 'G') {
             detail::stats.nbx++;
-            detail::Ops<Real>::copy(n, resid, 1, &workd[irj], 1);
+            detail::Ops<Real, Backend>::copy(bref, n, resid, 1, &workd[irj], 1);
             bop(&workd[irj], &workd[ipj]);
           } else {
-            detail::Ops<Real>::copy(n, resid, 1, &workd[ipj], 1);
+            detail::Ops<Real, Backend>::copy(bref, n, resid, 1, &workd[ipj], 1);
           }
           if (bmat[0] == 'G') {
             detail::arscnd(t3);
@@ -168,10 +168,10 @@ namespace arnoldi::detail {
           }
 
           if (bmat[0] == 'G') {
-            rnorm1 = detail::pdot<Real>(comm, n, resid, 1, &workd[ipj], 1);
+            rnorm1 = detail::pdot<Real, Backend>(bref, comm, n, resid, 1, &workd[ipj], 1);
             rnorm1 = std::sqrt(std::abs(rnorm1));
           } else {
-            rnorm1 = detail::pnrm2_real<Real>(comm, n, resid, 1);
+            rnorm1 = detail::pnrm2_real<Real, Backend>(bref, comm, n, resid, 1);
           }
 
           if (msglvl > 0 && iter > 0) {
@@ -190,7 +190,7 @@ namespace arnoldi::detail {
           detail::stats.nitref++;
           rnorm = rnorm1;
           if (iter == 1) {
-            for (int jj = 0; jj < n; jj++) resid[jj] = (Real)0;
+            detail::Ops<Real, Backend>::zero(bref, n, resid);
             rnorm = (Real)0;
           }
         }
@@ -221,9 +221,9 @@ namespace arnoldi::detail {
 
   // napps — apply implicit shifts to nonsymmetric Arnoldi factorisation.
   // Ported from ARPACK dnapps.f (goto-free version).
-  template <typename Real>
-  void napps(int n, int& kev, int np, Real* shiftr, Real* shifti, Real* v, int ldv, Real* h, int ldh, Real* resid, Real* q,
-             int ldq, Real* workl, Real* workd) {
+  template <typename Real, typename Backend = detail::CpuBackend>
+  void napps(detail::BackendRef<Backend> bref, int n, int& kev, int np, Real* shiftr, Real* shifti, Real* v, int ldv, Real* h,
+             int ldh, Real* resid, Real* q, int ldq, Real* workl, Real* workd) {
     Real unfl = detail::Ops<Real>::lamch("safe minimum");
     Real ovfl = Real(1) / unfl;
     detail::Ops<Real>::labad(unfl, ovfl);
@@ -394,19 +394,20 @@ namespace arnoldi::detail {
     }
 
     if (h[(kev - 1) * ldh + kev] > Real(0))
-      detail::Ops<Real>::gemv("N", n, kplusp, Real(1), v, ldv, &q[kev * ldq], 1, Real(0), &workd[n], 1);
+      detail::Ops<Real, Backend>::gemv(bref, "N", n, kplusp, Real(1), v, ldv, &q[kev * ldq], 1, Real(0), &workd[n], 1);
 
     for (int i = 1; i <= kev; i++) {
-      detail::Ops<Real>::gemv("N", n, kplusp - i + 1, Real(1), v, ldv, &q[(kev - i) * ldq], 1, Real(0), workd, 1);
-      detail::Ops<Real>::copy(n, workd, 1, &v[(kplusp - i) * ldv], 1);
+      detail::Ops<Real, Backend>::gemv(bref, "N", n, kplusp - i + 1, Real(1), v, ldv, &q[(kev - i) * ldq], 1, Real(0), workd, 1);
+      detail::Ops<Real, Backend>::copy(bref, n, workd, 1, &v[(kplusp - i) * ldv], 1);
     }
 
-    detail::Ops<Real>::lacpy("A", n, kev, &v[(kplusp - kev) * ldv], ldv, v, ldv);
+    detail::Ops<Real, Backend>::lacpy("A", n, kev, &v[(kplusp - kev) * ldv], ldv, v, ldv);
 
-    if (h[(kev - 1) * ldh + kev] > Real(0)) detail::Ops<Real>::copy(n, &workd[n], 1, &v[kev * ldv], 1);
+    if (h[(kev - 1) * ldh + kev] > Real(0)) detail::Ops<Real, Backend>::copy(bref, n, &workd[n], 1, &v[kev * ldv], 1);
 
-    detail::Ops<Real>::scal(n, q[(kev - 1) * ldq + (kplusp - 1)], resid, 1);
-    if (h[(kev - 1) * ldh + kev] > Real(0)) detail::Ops<Real>::axpy(n, h[(kev - 1) * ldh + kev], &v[kev * ldv], 1, resid, 1);
+    detail::Ops<Real, Backend>::scal(bref, n, q[(kev - 1) * ldq + (kplusp - 1)], resid, 1);
+    if (h[(kev - 1) * ldh + kev] > Real(0))
+      detail::Ops<Real, Backend>::axpy(bref, n, h[(kev - 1) * ldh + kev], &v[kev * ldv], 1, resid, 1);
 
     if (msglvl > 1) {
       detail::debug.vout(1, &q[(kev - 1) * ldq + (kplusp - 1)], "_napps: sigmak = (e_{kev+p}^T*Q)*e_{kev}");
@@ -420,10 +421,11 @@ namespace arnoldi::detail {
   }
 
   // naup2 — main Arnoldi iteration driver (nonsymmetric).
-  template <typename Real, typename OP, typename BOP, typename Comm>
-  void naup2(const char* bmat, int n, const char* which, int& nev, int& np, Real tol, Real* resid, int mode, int iupd, int ishift,
-             int& mxiter, Real* v, int ldv, Real* h, int ldh, Real* ritzr, Real* ritzi, Real* bounds, Real* q, int ldq,
-             Real* workl, Real* workd, int& info, OP&& op, BOP&& bop, const Comm& comm) {
+  template <typename Real, typename Backend = detail::CpuBackend, typename OP, typename BOP, typename Comm>
+  void naup2(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int& nev, int& np, Real tol,
+             Real* resid, int mode, int iupd, int ishift, int& mxiter, Real* v, int ldv, Real* h, int ldh, Real* ritzr,
+             Real* ritzi, Real* bounds, Real* q, int ldq, Real* workl, Real* workd, int& info, OP&& op, BOP&& bop,
+             const Comm& comm) {
     double t0, t1, t2, t3;
     detail::arscnd(t0);
     int  msglvl = detail::debug.aup2;
@@ -448,14 +450,14 @@ namespace arnoldi::detail {
       detail::stats.aup2 = t1 - t0;
     };
 
-    getv0<Real>(bmat, 1, initv, n, 1, v, ldv, resid, rnorm, workd, info, op, bop, comm);
+    getv0<Real, Backend>(bref, bmat, 1, initv, n, 1, v, ldv, resid, rnorm, workd, info, op, bop, comm);
     if (rnorm == (Real)0) {
       info = -9;
       end_naup2();
       return;
     }
 
-    naitr<Real>(bmat, n, 0, nev, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
+    naitr<Real, Backend>(bref, bmat, n, 0, nev, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
     if (info > 0) {
       np     = info;
       mxiter = iter;
@@ -477,7 +479,7 @@ namespace arnoldi::detail {
         detail::debug.ivout(1, &np, "_naup2: Extend the Arnoldi factorization by");
       }
 
-      naitr<Real>(bmat, n, nev, np, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
+      naitr<Real, Backend>(bref, bmat, n, nev, np, mode, resid, rnorm, v, ldv, h, ldh, workd, info, op, bop, comm);
       if (info > 0) {
         np     = info;
         mxiter = iter;
@@ -604,19 +606,19 @@ namespace arnoldi::detail {
         }
       }
 
-      napps<Real>(n, nev, np, ritzr, ritzi, v, ldv, h, ldh, resid, q, ldq, workl, workd);
+      napps<Real, Backend>(bref, n, nev, np, ritzr, ritzi, v, ldv, h, ldh, resid, q, ldq, workl, workd);
 
       // B-norm of residual after compression.
       detail::arscnd(t2);
       if (bmat[0] == 'G') {
         detail::stats.nbx++;
-        detail::Ops<Real>::copy(n, resid, 1, &workd[n], 1);
+        detail::Ops<Real, Backend>::copy(bref, n, resid, 1, &workd[n], 1);
         bop(&workd[n], workd);
-        rnorm = detail::pdot<Real>(comm, n, resid, 1, workd, 1);
+        rnorm = detail::pdot<Real, Backend>(bref, comm, n, resid, 1, workd, 1);
         rnorm = std::sqrt(std::abs(rnorm));
       } else {
-        detail::Ops<Real>::copy(n, resid, 1, workd, 1);
-        rnorm = detail::pnrm2_real<Real>(comm, n, resid, 1);
+        detail::Ops<Real, Backend>::copy(bref, n, resid, 1, workd, 1);
+        rnorm = detail::pnrm2_real<Real, Backend>(bref, comm, n, resid, 1);
       }
       if (bmat[0] == 'G') {
         detail::arscnd(t3);
@@ -635,9 +637,10 @@ namespace arnoldi::detail {
   }
 
   // naupd — nonsymmetric eigensolver entry point (callback version).
-  template <typename Real, typename OP, typename BOP, typename Comm>
-  void naupd(const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid, int ncv, Real* v, int ldv, int* iparam,
-             int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op, BOP&& bop, const Comm& comm) {
+  template <typename Real, typename Backend = detail::CpuBackend, typename OP, typename BOP, typename Comm>
+  void naupd(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid,
+             int ncv, Real* v, int ldv, int* iparam, int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op,
+             BOP&& bop, const Comm& comm) {
     detail::stats.reset();
     double t0, t1;
     detail::arscnd(t0);
@@ -702,8 +705,8 @@ namespace arnoldi::detail {
     ipntr[7]   = bounds;
     ipntr[13]  = iw;
 
-    naup2<Real>(bmat, n, which, nev0, np, tol, resid, mode, iupd, ishift, mxiter, v, ldv, &workl[ih], ldh, &workl[ritzr],
-                &workl[ritzi], &workl[bounds], &workl[iq], ldq, &workl[iw], workd, info, op, bop, comm);
+    naup2<Real, Backend>(bref, bmat, n, which, nev0, np, tol, resid, mode, iupd, ishift, mxiter, v, ldv, &workl[ih], ldh,
+                         &workl[ritzr], &workl[ritzi], &workl[bounds], &workl[iq], ldq, &workl[iw], workd, info, op, bop, comm);
 
     iparam[2]  = mxiter;
     iparam[4]  = np;
@@ -751,20 +754,43 @@ namespace arnoldi::detail {
   }
 
   // op + bop, no comm (defaults to SerialComm).
-  template <typename Real, typename OP, typename BOP>
-  void naupd(const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid, int ncv, Real* v, int ldv, int* iparam,
-             int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op, BOP&& bop) {
-    naupd<Real>(bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op),
-                std::forward<BOP>(bop), SerialComm{});
+  template <typename Real, typename Backend = detail::CpuBackend, typename OP, typename BOP>
+  void naupd(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid,
+             int ncv, Real* v, int ldv, int* iparam, int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op,
+             BOP&& bop) {
+    naupd<Real, Backend>(bref, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info,
+                         std::forward<OP>(op), std::forward<BOP>(bop), SerialComm{});
   }
 
   // Standard problem (bmat='I'), no bop, no comm.
+  template <typename Real, typename Backend = detail::CpuBackend, typename OP>
+  void naupd(detail::BackendRef<Backend> bref, const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid,
+             int ncv, Real* v, int ldv, int* iparam, int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op) {
+    naupd<Real, Backend>(
+        bref, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op),
+        [](const Real*, Real*) {}, SerialComm{});
+  }
+
+  // ---------------------------------------------------------------------------
+  // naupd no-BackendRef overloads — defaults to CpuBackend for the historical
+  // public callback API (tests, examples).
+  template <typename Real, typename OP, typename BOP, typename Comm>
+  void naupd(const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid, int ncv, Real* v, int ldv, int* iparam,
+             int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op, BOP&& bop, const Comm& comm) {
+    naupd<Real, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam,
+                                    ipntr, workd, workl, lworkl, info, std::forward<OP>(op), std::forward<BOP>(bop), comm);
+  }
+  template <typename Real, typename OP, typename BOP>
+  void naupd(const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid, int ncv, Real* v, int ldv, int* iparam,
+             int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op, BOP&& bop) {
+    naupd<Real, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam,
+                                    ipntr, workd, workl, lworkl, info, std::forward<OP>(op), std::forward<BOP>(bop));
+  }
   template <typename Real, typename OP>
   void naupd(const char* bmat, int n, const char* which, int nev, Real& tol, Real* resid, int ncv, Real* v, int ldv, int* iparam,
              int* ipntr, Real* workd, Real* workl, int lworkl, int& info, OP&& op) {
-    naupd<Real>(
-        bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info, std::forward<OP>(op),
-        [](const Real*, Real*) {}, SerialComm{});
+    naupd<Real, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam,
+                                    ipntr, workd, workl, lworkl, info, std::forward<OP>(op));
   }
 
   // neupd — nonsymmetric eigenvector extraction (callback version).
@@ -772,10 +798,10 @@ namespace arnoldi::detail {
   // Reads the Hessenberg factorization and Ritz data left by cb::naupd in
   // workl/ipntr/iparam (cb::naupd stores 0-based offsets in ipntr[4..7,13])
   // and computes eigenvalues (dr,di) and optionally eigenvectors z.
-  template <typename Real>
-  void neupd(bool rvec, const char* howmny, Real* dr, Real* di, Real* z, int ldz, Real sigmar, Real sigmai, Real* workev,
-             const char* bmat, int n, const char* which, int nev, Real tol, Real* resid, int ncv, Real* v, int ldv, int* iparam,
-             int* ipntr, Real* workd, Real* workl, int lworkl, int& info) {
+  template <typename Real, typename Backend = detail::CpuBackend>
+  void neupd(detail::BackendRef<Backend> bref, bool rvec, const char* howmny, Real* dr, Real* di, Real* z, int ldz, Real sigmar,
+             Real sigmai, Real* workev, const char* bmat, int n, const char* which, int nev, Real tol, Real* resid, int ncv,
+             Real* v, int ldv, int* iparam, int* ipntr, Real* workd, Real* workl, int lworkl, int& info) {
     int msglvl = detail::debug.eupd;
     int mode   = iparam[6];
     int nconv  = iparam[4];
@@ -957,9 +983,9 @@ namespace arnoldi::detail {
 
       detail::Ops<Real>::geqr2_(&ncv, &nconv, &workl[invsub], &ldq, workev, &workev[ncv], &ierr);
 
-      detail::Ops<Real>::orm2r_("Right", "Notranspose", &n, &ncv, &nconv, &workl[invsub], &ldq, workev, v, &ldv, &workd[n],
-                                &ierr);
-      detail::Ops<Real>::lacpy("All", n, nconv, v, ldv, z, ldz);
+      detail::Ops<Real, Backend>::orm2r_("Right", "Notranspose", &n, &ncv, &nconv, &workl[invsub], &ldq, workev, v, &ldv,
+                                         &workd[n], &ierr);
+      detail::Ops<Real, Backend>::lacpy("All", n, nconv, v, ldv, z, ldz);
 
       for (int j = 0; j < nconv; j++) {
         if (workl[invsub + j * ldq + j] < Real(0)) {
@@ -1026,13 +1052,13 @@ namespace arnoldi::detail {
 
         detail::Ops<Real>::geqr2_(&ncv, &nconv, &workl[invsub], &ldq, workev, &workev[ncv], &ierr);
 
-        detail::Ops<Real>::orm2r_("Right", "Notranspose", &n, &ncv, &nconv, &workl[invsub], &ldq, workev, z, &ldz, &workd[n],
-                                  &ierr);
+        detail::Ops<Real, Backend>::orm2r_("Right", "Notranspose", &n, &ncv, &nconv, &workl[invsub], &ldq, workev, z, &ldz,
+                                           &workd[n], &ierr);
 
         {
           Real done = Real(1);
-          detail::Ops<Real>::trmm_("Right", "Upper", "No transpose", "Non-unit", &n, &nconv, &done, &workl[invsub], &ldq, z,
-                                   &ldz);
+          detail::Ops<Real, Backend>::trmm_("Right", "Upper", "No transpose", "Non-unit", &n, &nconv, &done, &workl[invsub], &ldq,
+                                            z, &ldz);
         }
       }
 
@@ -1100,8 +1126,18 @@ namespace arnoldi::detail {
           iconj = 0;
         }
       }
-      detail::Ops<Real>::ger(n, nconv, Real(1), resid, 1, workev, 1, z, ldz);
+      detail::Ops<Real, Backend>::ger(n, nconv, Real(1), resid, 1, workev, 1, z, ldz);
     }
+  }
+
+  // neupd no-BackendRef overload — defaults to CpuBackend for the historical
+  // public callback API (tests, examples).
+  template <typename Real>
+  void neupd(bool rvec, const char* howmny, Real* dr, Real* di, Real* z, int ldz, Real sigmar, Real sigmai, Real* workev,
+             const char* bmat, int n, const char* which, int nev, Real tol, Real* resid, int ncv, Real* v, int ldv, int* iparam,
+             int* ipntr, Real* workd, Real* workl, int lworkl, int& info) {
+    neupd<Real, detail::CpuBackend>(detail::BackendRef<detail::CpuBackend>{}, rvec, howmny, dr, di, z, ldz, sigmar, sigmai, workev,
+                                    bmat, n, which, nev, tol, resid, ncv, v, ldv, iparam, ipntr, workd, workl, lworkl, info);
   }
 
 }  // namespace arnoldi::detail

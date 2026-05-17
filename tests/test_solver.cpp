@@ -5,24 +5,19 @@
 #include <arnoldi/arnoldi.hpp>
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <complex>
-#include <cstdio>
 #include <numeric>
 #include <vector>
 
-
-static int g_pass = 0, g_fail = 0;
-
-static void check(const char* name, bool cond) {
-    if (cond) {
-        std::printf("  OK    %s\n", name);
-        ++g_pass;
-    } else {
-        std::printf("  FAIL  %s\n", name);
-        ++g_fail;
-    }
-}
+// Bridge the legacy check("desc", cond) calls onto Catch2: the description
+// becomes scoped INFO context (shown on failure) and the condition a CHECK.
+#define check(msg, cond) \
+    do {                 \
+        INFO(msg);       \
+        CHECK((cond));   \
+    } while (0)
 
 // 1D Laplacian: A(i,i)=2, A(i,i±1)=-1, eigenvalues = 2-2*cos(k*pi/(n+1)).
 static void av_laplacian(int n, const double* x, double* y) {
@@ -36,7 +31,7 @@ static double exact_eig_laplacian(int n, int k) {
     return 2.0 - 2.0 * std::cos(k * M_PI / (n + 1));
 }
 
-void test_sym_double() {
+TEST_CASE("test_sym_double", "[solver]") {
     const int n = 64, nev = 4, ncv = 12;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "SM", nev, ncv);
     s.tol(1e-12).maxiter(500);
@@ -60,7 +55,7 @@ void test_sym_double() {
     check("Sym<double>: eigenvalue accuracy < 1e-10", maxerr < 1e-10);
 }
 
-void test_sym_float() {
+TEST_CASE("test_sym_float", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, float> s("I", n, "SM", nev, ncv);
     s.tol(1e-5f).maxiter(500);
@@ -81,7 +76,7 @@ void test_sym_float() {
     check("Sym<float>: eigenvalue accuracy < 1e-4", maxerr < 1e-4f);
 }
 
-void test_nonsym_double() {
+TEST_CASE("test_nonsym_double", "[solver]") {
     const int n = 64, nev = 4, ncv = 14;
     const double rho = 10.0;
     const double h = 1.0 / (n + 1);
@@ -115,7 +110,7 @@ void test_nonsym_double() {
     check("Nonsym<double>: LM eigenvalues have large magnitude", min_mag > 100.0);
 }
 
-void test_herm_complex_double() {
+TEST_CASE("test_herm_complex_double", "[solver]") {
     using cplx = std::complex<double>;
     const int n = 64, nev = 4, ncv = 12;
     const cplx off(-1.0, 0.25);
@@ -138,7 +133,7 @@ void test_herm_complex_double() {
         check("Herm<cdouble>: eigenvalues are real-valued (small)", std::isfinite(r.values[i]));
 }
 
-void test_user_initial_resid() {
+TEST_CASE("test_user_initial_resid", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
     std::vector<double> resid(n, 1.0);
 
@@ -153,7 +148,7 @@ void test_user_initial_resid() {
     check("user_resid: eigenvalue accurate", err < 1e-10);
 }
 
-void test_values_only() {
+TEST_CASE("test_values_only", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "SM", nev, ncv);
     s.tol(1e-12).maxiter(500);
@@ -167,7 +162,7 @@ void test_values_only() {
     check("values_only: eigenvalue is small", r.values[0] < 0.1);
 }
 
-void test_nonsym_values_only() {
+TEST_CASE("test_nonsym_values_only", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Nonsym, double> s("I", n, "LM", nev, ncv);
     s.tol(1e-12).maxiter(500);
@@ -179,7 +174,7 @@ void test_nonsym_values_only() {
     check("nonsym_values_only: values_re non-zero", std::abs(r.values_re[0]) > 0.01);
 }
 
-void test_sym_which_LM() {
+TEST_CASE("test_sym_which_LM", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "LM", nev, ncv);
     s.tol(1e-12).maxiter(500);
@@ -190,7 +185,7 @@ void test_sym_which_LM() {
     check("Sym which=LM: largest eig > 3.5", r.values[0] > 3.5);
 }
 
-void test_sym_which_LA() {
+TEST_CASE("test_sym_which_LA", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "LA", nev, ncv);
     s.tol(1e-12).maxiter(500);
@@ -201,7 +196,7 @@ void test_sym_which_LA() {
     check("Sym which=LA: largest algebraic > 3.5", r.values[nev - 1] > 3.5);
 }
 
-void test_sym_which_SA() {
+TEST_CASE("test_sym_which_SA", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "SA", nev, ncv);
     s.tol(1e-12).maxiter(500);
@@ -213,7 +208,7 @@ void test_sym_which_SA() {
     check("Sym which=SA: all eigenvalues small", maxv < 0.15);
 }
 
-void test_sym_which_BE() {
+TEST_CASE("test_sym_which_BE", "[solver]") {
     const int n = 32, nev = 4, ncv = 12;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "BE", nev, ncv);
     s.tol(1e-12).maxiter(500);
@@ -228,7 +223,7 @@ void test_sym_which_BE() {
 
 // A = Laplacian, B = 2*I.  Eigenvalues of A*x = lambda*B*x are half the
 // standard eigenvalues, so OP = inv(B)*A = A/2 in mode 2.
-void test_sym_generalized() {
+TEST_CASE("test_sym_generalized", "[solver]") {
     const int n = 32, nev = 3, ncv = 10;
 
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("G", n, "LM", nev, ncv);
@@ -250,7 +245,7 @@ void test_sym_generalized() {
     check("Sym generalized: largest eig > 1.5", r.values[0] > 1.5);
 }
 
-void test_insufficient_maxiter() {
+TEST_CASE("test_insufficient_maxiter", "[solver]") {
     const int n = 64, nev = 4, ncv = 12;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "SM", nev, ncv);
     s.tol(1e-14).maxiter(1);
@@ -261,7 +256,7 @@ void test_insufficient_maxiter() {
           s.info() != 0 || s.num_converged() < nev);
 }
 
-void test_accessors() {
+TEST_CASE("test_accessors", "[solver]") {
     const int n = 16, nev = 2, ncv = 6;
     arnoldi::Arnoldi<arnoldi::Kind::Sym, double> s("I", n, "SM", nev, ncv);
     s.tol(1e-10).maxiter(300);
@@ -271,26 +266,4 @@ void test_accessors() {
     check("accessors: workl() != nullptr", s.workl() != nullptr);
     check("accessors: iparam() != nullptr", s.iparam() != nullptr);
     check("accessors: ipntr() != nullptr", s.ipntr() != nullptr);
-}
-
-int main() {
-    std::printf("test_solver:\n");
-
-    test_sym_double();
-    test_sym_float();
-    test_nonsym_double();
-    test_herm_complex_double();
-    test_user_initial_resid();
-    test_values_only();
-    test_nonsym_values_only();
-    test_sym_which_LM();
-    test_sym_which_LA();
-    test_sym_which_SA();
-    test_sym_which_BE();
-    test_sym_generalized();
-    test_insufficient_maxiter();
-    test_accessors();
-
-    std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
-    return g_fail > 0 ? 1 : 0;
 }

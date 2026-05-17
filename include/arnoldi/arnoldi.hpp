@@ -52,11 +52,12 @@ namespace arnoldi {
 
   }  // namespace detail
 
-  template <Kind K, typename Scalar, typename Comm = SerialComm>
+  template <Kind K, typename Scalar, typename Comm = SerialComm, typename Backend = arnoldi::detail::CpuBackend>
   class Arnoldi {
   public:
     using real_type   = typename detail::real_of<Scalar>::type;
     using scalar_type = Scalar;
+    using backend_type = Backend;
 
   private:
     static_assert(std::is_floating_point_v<real_type>,
@@ -72,9 +73,17 @@ namespace arnoldi {
     static_assert(K != Kind::Herm || detail::is_complex_v<Scalar>,
                   "Kind::Herm requires a complex Scalar (std::complex<float/double>)");
 
+    // The nonsymmetric path goes through real-Schur LAPACK auxiliaries
+    // (dlahqr_/dtrsen_/dtrevc_) that have no cuSOLVER analogue for
+    // Hessenberg matrices. Only Sym / Herm are supported under device
+    // backends; reject Nonsym + non-CpuBackend at compile time.
+    static_assert(K != Kind::Nonsym || std::is_same_v<Backend, arnoldi::detail::CpuBackend>,
+                  "Kind::Nonsym requires CpuBackend (no device specialization for the real-Schur LAPACK aux)");
+
   public:
-    Arnoldi(std::string bmat, int n, std::string which, int nev, int ncv, Comm comm = Comm{}) :
-        bmat_(std::move(bmat)), which_(std::move(which)), n_(n), nev_(nev), ncv_(ncv), ldv_(n), comm_(std::move(comm)) {
+    Arnoldi(std::string bmat, int n, std::string which, int nev, int ncv, Comm comm = Comm{}, Backend backend = Backend{}) :
+        bmat_(std::move(bmat)), which_(std::move(which)), n_(n), nev_(nev), ncv_(ncv), ldv_(n), comm_(std::move(comm)),
+        backend_(std::move(backend)) {
       if (n_ <= 0) throw std::invalid_argument("Arnoldi: n must be > 0");
       if (nev_ <= 0) throw std::invalid_argument("Arnoldi: nev must be > 0");
       int n_global = comm_.allreduce_sum(n_);
@@ -128,11 +137,31 @@ namespace arnoldi {
       return *this;
     }
 
+    // Seed the iteration with a user-provided initial residual vector. `r`
+    // is a HOST pointer; under CudaBackend the data is staged H->D once,
+    // here, into the device-resident resid_ buffer.
     Arnoldi& initial_resid(const Scalar* r) {
-      std::copy(r, r + n_, resid_.begin());
+      arnoldi::detail::buffer_traits<Backend, scalar_type>::copy_from_host(resid_, r, static_cast<std::size_t>(n_));
       info_in_ = 1;
       return *this;
     }
+
+    // Device-pointer overload: only available under a non-CpuBackend (e.g.
+    // CudaBackend). Copies device-to-device into resid_. The device-specific
+    // buffer_traits specialization supplies copy_from_device; this member
+    // is SFINAE'd out under CpuBackend.
+    template <typename B = Backend, std::enable_if_t<!std::is_same_v<B, arnoldi::detail::CpuBackend>, int> = 0>
+    Arnoldi& initial_resid_device(const Scalar* r) {
+      arnoldi::detail::buffer_traits<B, scalar_type>::copy_from_device(resid_, r, static_cast<std::size_t>(n_));
+      info_in_ = 1;
+      return *this;
+    }
+
+    // Accessor returning a reference to the owned backend. Users invoking
+    // a GPU matvec from inside their callback can grab the cuBLAS handle
+    // and stream via `solver.backend().handle()` / `solver.backend().stream()`.
+    Backend&       backend() noexcept { return backend_; }
+    const Backend& backend() const noexcept { return backend_; }
 
     template <class Op>
     void solve(Op&& op) {
@@ -165,6 +194,16 @@ namespace arnoldi {
 
     using Result = std::conditional_t<K == Kind::Sym, SymResult, std::conditional_t<K == Kind::Nonsym, NonsymResult, HermResult>>;
 
+    // Sym / Herm result with eigenvectors left on the device. Eigenvalues are
+    // always host-resident (they come out of the ncv-sized Hessenberg
+    // subproblem, computed on host). The eigenvector matrix is the device
+    // buffer seupd's final GEMM wrote into — handed back without the n×nev
+    // device→host copy that eigenpairs() performs.
+    struct DeviceResult {
+      std::vector<real_type>                                                    values;   // size nev (host)
+      typename arnoldi::detail::buffer_traits<Backend, scalar_type>::vector_type vectors;  // n × nev (device)
+    };
+
     // Real shift (Sym / Herm only).
     template <Kind KK = K, std::enable_if_t<KK != Kind::Nonsym, int> = 0>
     Result eigenpairs(bool compute_vectors = true, real_type sigma = real_type{}) {
@@ -175,6 +214,25 @@ namespace arnoldi {
     template <Kind KK = K, std::enable_if_t<KK == Kind::Nonsym, int> = 0>
     Result eigenpairs(bool compute_vectors = true, real_type sigmar = real_type{}, real_type sigmai = real_type{}) {
       return extract_(compute_vectors, sigmar, sigmai);
+    }
+
+    // Sym / Herm only, device backends only: extract eigenpairs leaving the
+    // eigenvector matrix on the device (column-major, n × nev). Use this when
+    // downstream work consumes the eigenvectors on the GPU and the host copy
+    // that eigenpairs() does would be wasted.
+    template <Kind KK = K, typename B = Backend,
+              std::enable_if_t<KK != Kind::Nonsym && !std::is_same_v<B, arnoldi::detail::CpuBackend>, int> = 0>
+    DeviceResult eigenpairs_device(bool compute_vectors = true, real_type sigma = real_type{}) {
+      DeviceResult out{};
+      out.values.assign(static_cast<std::size_t>(nev_), real_type{});
+      if (compute_vectors) out.vectors.assign(static_cast<std::size_t>(n_) * nev_, Scalar{});
+
+      auto bref = backend_.ref();
+      arnoldi::detail::seupd<Scalar, Backend>(bref, compute_vectors, "A", out.values.data(),
+                                              compute_vectors ? out.vectors.data() : nullptr, n_, sigma, bmat_.c_str(), n_,
+                                              which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_, iparam_.data(),
+                                              ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_, comm_);
+      return out;
     }
 
     bool             converged() const noexcept { return info_ == 0 && iparam_[4] >= nev_; }
@@ -192,27 +250,31 @@ namespace arnoldi {
   private:
     template <class Op, class Bop>
     void dispatch_aupd_(Op&& op, Bop&& bop) {
+      auto bref = backend_.ref();
       if constexpr (K == Kind::Nonsym) {
-        arnoldi::detail::naupd<real_type>(bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_,
-                                      iparam_.data(), ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_,
-                                      std::forward<Op>(op), std::forward<Bop>(bop), comm_);
+        arnoldi::detail::naupd<real_type, Backend>(bref, bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_,
+                                                   v_.data(), ldv_, iparam_.data(), ipntr_.data(), workd_.data(), workl_.data(),
+                                                   lworkl_, info_, std::forward<Op>(op), std::forward<Bop>(bop), comm_);
       } else {  // Sym or Herm
-        arnoldi::detail::saupd<Scalar>(bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_,
-                                   iparam_.data(), ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_,
-                                   std::forward<Op>(op), std::forward<Bop>(bop), comm_);
+        arnoldi::detail::saupd<Scalar, Backend>(bref, bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_,
+                                                v_.data(), ldv_, iparam_.data(), ipntr_.data(), workd_.data(), workl_.data(),
+                                                lworkl_, info_, std::forward<Op>(op), std::forward<Bop>(bop), comm_);
       }
     }
 
     template <class Op>
     void dispatch_aupd_(Op&& op) {
+      auto bref = backend_.ref();
       if constexpr (K == Kind::Nonsym) {
-        arnoldi::detail::naupd<real_type>(
-            bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_, iparam_.data(), ipntr_.data(),
-            workd_.data(), workl_.data(), lworkl_, info_, std::forward<Op>(op), [](const real_type*, real_type*) {}, comm_);
+        arnoldi::detail::naupd<real_type, Backend>(
+            bref, bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_, iparam_.data(),
+            ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_, std::forward<Op>(op),
+            [](const real_type*, real_type*) {}, comm_);
       } else {
-        arnoldi::detail::saupd<Scalar>(
-            bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_, iparam_.data(), ipntr_.data(),
-            workd_.data(), workl_.data(), lworkl_, info_, std::forward<Op>(op), [](const Scalar*, Scalar*) {}, comm_);
+        arnoldi::detail::saupd<Scalar, Backend>(
+            bref, bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_, iparam_.data(),
+            ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_, std::forward<Op>(op), [](const Scalar*, Scalar*) {},
+            comm_);
       }
     }
 
@@ -221,9 +283,28 @@ namespace arnoldi {
       out.values.assign(static_cast<std::size_t>(nev_), real_type{});
       if (rvec) out.vectors.assign(static_cast<std::size_t>(n_) * nev_, Scalar{});
 
-      arnoldi::detail::seupd<Scalar>(rvec, "A", out.values.data(), rvec ? out.vectors.data() : nullptr, n_, sigma, bmat_.c_str(), n_,
-                                 which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(), ldv_, iparam_.data(), ipntr_.data(),
-                                 workd_.data(), workl_.data(), lworkl_, info_, comm_);
+      auto bref = backend_.ref();
+      if constexpr (std::is_same_v<Backend, arnoldi::detail::CpuBackend>) {
+        // CPU: seupd writes the final V*S directly into host out.vectors.
+        arnoldi::detail::seupd<Scalar, Backend>(bref, rvec, "A", out.values.data(), rvec ? out.vectors.data() : nullptr, n_, sigma,
+                                                bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(),
+                                                ldv_, iparam_.data(), ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_,
+                                                comm_);
+      } else {
+        // Device: allocate a device buffer for z, run seupd into it (final
+        // GEMM lands on device), then copy down to host out.vectors. The
+        // matching `buffer_copy_to_host` and `buffer_traits` specialisations
+        // come from the device-specific backend header (e.g. cuda.hpp).
+        typename arnoldi::detail::buffer_traits<Backend, scalar_type>::vector_type z_dev;
+        if (rvec) z_dev.assign(static_cast<std::size_t>(n_) * nev_, Scalar{});
+        arnoldi::detail::seupd<Scalar, Backend>(bref, rvec, "A", out.values.data(), rvec ? z_dev.data() : nullptr, n_, sigma,
+                                                bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(),
+                                                ldv_, iparam_.data(), ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_,
+                                                comm_);
+        if (rvec)
+          arnoldi::detail::buffer_traits<Backend, scalar_type>::copy_to_host(out.vectors.data(), z_dev,
+                                                                              static_cast<std::size_t>(n_) * nev_);
+      }
       return out;
     }
 
@@ -235,10 +316,11 @@ namespace arnoldi {
       out.values_im.assign(static_cast<std::size_t>(nev_ + 1), real_type{});
       if (rvec) out.vectors.assign(static_cast<std::size_t>(n_) * (nev_ + 1), Scalar{});
 
-      arnoldi::detail::neupd<real_type>(rvec, "A", out.values_re.data(), out.values_im.data(), rvec ? out.vectors.data() : nullptr,
-                                    n_, sigmar, sigmai, workev_.data(), bmat_.c_str(), n_, which_.c_str(), nev_, tol_,
-                                    resid_.data(), ncv_, v_.data(), ldv_, iparam_.data(), ipntr_.data(), workd_.data(),
-                                    workl_.data(), lworkl_, info_);
+      auto bref = backend_.ref();
+      arnoldi::detail::neupd<real_type, Backend>(bref, rvec, "A", out.values_re.data(), out.values_im.data(),
+                                                 rvec ? out.vectors.data() : nullptr, n_, sigmar, sigmai, workev_.data(),
+                                                 bmat_.c_str(), n_, which_.c_str(), nev_, tol_, resid_.data(), ncv_, v_.data(),
+                                                 ldv_, iparam_.data(), ipntr_.data(), workd_.data(), workl_.data(), lworkl_, info_);
       return out;
     }
 
@@ -250,10 +332,15 @@ namespace arnoldi {
     int                      info_in_ = 0;  // initial value fed into *aupd (1 if user gave resid)
     real_type                tol_     = real_type{};
     Comm                     comm_;
+    Backend                  backend_;
 
-    std::vector<scalar_type> resid_;
-    std::vector<scalar_type> v_;
-    std::vector<scalar_type> workd_;
+    // Length-n workspace lives on the backend (host std::vector under
+    // CpuBackend, device_vector under CudaBackend).
+    typename arnoldi::detail::buffer_traits<Backend, scalar_type>::vector_type resid_;
+    typename arnoldi::detail::buffer_traits<Backend, scalar_type>::vector_type v_;
+    typename arnoldi::detail::buffer_traits<Backend, scalar_type>::vector_type workd_;
+    // The IRA bookkeeping (Hessenberg, Ritz values/bounds, Givens scratch)
+    // is small (ncv²-sized) and stays host-resident under every backend.
     std::vector<real_type>   workl_;
     std::vector<real_type>   workev_;  // Nonsym only
 
@@ -261,12 +348,12 @@ namespace arnoldi {
     std::array<int, 14>      ipntr_{};
   };
 
-  template <class R, class C = SerialComm>
-  using SymArnoldi = Arnoldi<Kind::Sym, R, C>;
-  template <class R, class C = SerialComm>
-  using NonsymArnoldi = Arnoldi<Kind::Nonsym, R, C>;
-  template <class R, class C = SerialComm>
-  using HermArnoldi = Arnoldi<Kind::Herm, std::complex<R>, C>;
+  template <class R, class C = SerialComm, class B = arnoldi::detail::CpuBackend>
+  using SymArnoldi = Arnoldi<Kind::Sym, R, C, B>;
+  template <class R, class C = SerialComm, class B = arnoldi::detail::CpuBackend>
+  using NonsymArnoldi = Arnoldi<Kind::Nonsym, R, C, B>;
+  template <class R, class C = SerialComm, class B = arnoldi::detail::CpuBackend>
+  using HermArnoldi = Arnoldi<Kind::Herm, std::complex<R>, C, B>;
 
 }  // namespace arnoldi
 
